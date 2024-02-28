@@ -1,16 +1,17 @@
 const std = @import("std");
 const Cases = @import("src/Cases.zig");
+const nl = if (@import("builtin").os.tag == .windows) "\r\n" else "\n";
 
-// These tests should work with all platforms, but we're using linux_x64 for
-// now for consistency. Will be expanded eventually.
-const linux_x64 = std.zig.CrossTarget{
-    .cpu_arch = .x86_64,
-    .os_tag = .linux,
-};
+pub fn addCases(ctx: *Cases, b: *std.Build) !void {
+    // These tests should work with all platforms, but we're using linux_x64 for
+    // now for consistency. Will be expanded eventually.
+    const linux_x64: std.Target.Query = .{
+        .cpu_arch = .x86_64,
+        .os_tag = .linux,
+    };
 
-pub fn addCases(ctx: *Cases) !void {
     {
-        var case = ctx.exeFromCompiledC("hello world with updates", .{});
+        var case = ctx.exeFromCompiledC("hello world with updates", .{}, b);
 
         // Regular old hello world
         case.addCompareOutput(
@@ -19,7 +20,7 @@ pub fn addCases(ctx: *Cases) !void {
             \\    _ = puts("hello world!");
             \\    return 0;
             \\}
-        , "hello world!" ++ std.cstr.line_sep);
+        , "hello world!" ++ nl);
 
         // Now change the message only
         case.addCompareOutput(
@@ -28,7 +29,7 @@ pub fn addCases(ctx: *Cases) !void {
             \\    _ = puts("yo");
             \\    return 0;
             \\}
-        , "yo" ++ std.cstr.line_sep);
+        , "yo" ++ nl);
 
         // Add an unused Decl
         case.addCompareOutput(
@@ -38,7 +39,7 @@ pub fn addCases(ctx: *Cases) !void {
             \\    return 0;
             \\}
             \\fn unused() void {}
-        , "yo!" ++ std.cstr.line_sep);
+        , "yo!" ++ nl);
 
         // Comptime return type and calling convention expected.
         case.addError(
@@ -58,7 +59,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("var args", .{});
+        var case = ctx.exeFromCompiledC("var args", .{}, b);
 
         case.addCompareOutput(
             \\extern fn printf(format: [*:0]const u8, ...) c_int;
@@ -67,26 +68,26 @@ pub fn addCases(ctx: *Cases) !void {
             \\    _ = printf("Hello, %s!\n", "world");
             \\    return 0;
             \\}
-        , "Hello, world!" ++ std.cstr.line_sep);
+        , "Hello, world!" ++ nl);
     }
 
     {
-        var case = ctx.exeFromCompiledC("intToError", .{});
+        var case = ctx.exeFromCompiledC("errorFromInt", .{}, b);
 
         case.addCompareOutput(
             \\pub export fn main() c_int {
             \\    // comptime checks
             \\    const a = error.A;
             \\    const b = error.B;
-            \\    const c = @intToError(2);
-            \\    const d = @intToError(1);
+            \\    const c = @errorFromInt(2);
+            \\    const d = @errorFromInt(1);
             \\    if (!(c == b)) unreachable;
             \\    if (!(a == d)) unreachable;
             \\    // runtime checks
             \\    var x = error.A;
             \\    var y = error.B;
-            \\    var z = @intToError(2);
-            \\    var f = @intToError(1);
+            \\    var z = @errorFromInt(2);
+            \\    var f = @errorFromInt(1);
             \\    if (!(y == z)) unreachable;
             \\    if (!(x == f)) unreachable;
             \\    return 0;
@@ -94,20 +95,20 @@ pub fn addCases(ctx: *Cases) !void {
         , "");
         case.addError(
             \\pub export fn main() c_int {
-            \\    _ = @intToError(0);
+            \\    _ = @errorFromInt(0);
             \\    return 0;
             \\}
         , &.{":2:21: error: integer value '0' represents no error"});
         case.addError(
             \\pub export fn main() c_int {
-            \\    _ = @intToError(3);
+            \\    _ = @errorFromInt(3);
             \\    return 0;
             \\}
         , &.{":2:21: error: integer value '3' represents no error"});
     }
 
     {
-        var case = ctx.exeFromCompiledC("x86_64-linux inline assembly", linux_x64);
+        var case = ctx.exeFromCompiledC("x86_64-linux inline assembly", linux_x64, b);
 
         // Exit with 0
         case.addCompareOutput(
@@ -201,7 +202,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("alloc and retptr", .{});
+        var case = ctx.exeFromCompiledC("alloc and retptr", .{}, b);
 
         case.addCompareOutput(
             \\fn add(a: i32, b: i32) i32 {
@@ -219,7 +220,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("inferred local const and var", .{});
+        var case = ctx.exeFromCompiledC("inferred local const and var", .{}, b);
 
         case.addCompareOutput(
             \\fn add(a: i32, b: i32) i32 {
@@ -235,7 +236,7 @@ pub fn addCases(ctx: *Cases) !void {
         , "");
     }
     {
-        var case = ctx.exeFromCompiledC("control flow", .{});
+        var case = ctx.exeFromCompiledC("control flow", .{}, b);
 
         // Simple while loop
         case.addCompareOutput(
@@ -422,7 +423,7 @@ pub fn addCases(ctx: *Cases) !void {
         });
     }
     //{
-    //    var case = ctx.exeFromCompiledC("optionals", .{});
+    //    var case = ctx.exeFromCompiledC("optionals", .{}, b);
 
     //    // Simple while loop
     //    case.addCompareOutput(
@@ -450,7 +451,7 @@ pub fn addCases(ctx: *Cases) !void {
     //}
 
     {
-        var case = ctx.exeFromCompiledC("errors", .{});
+        var case = ctx.exeFromCompiledC("errors", .{}, b);
         case.addCompareOutput(
             \\pub export fn main() c_int {
             \\    var e1 = error.Foo;
@@ -494,7 +495,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("structs", .{});
+        var case = ctx.exeFromCompiledC("structs", .{}, b);
         case.addError(
             \\const Point = struct { x: i32, y: i32 };
             \\pub export fn main() c_int {
@@ -506,8 +507,9 @@ pub fn addCases(ctx: *Cases) !void {
             \\    return p.y - p.x - p.x;
             \\}
         , &.{
-            ":6:10: error: duplicate field",
-            ":4:10: note: other field here",
+            ":4:10: error: duplicate struct field name",
+            ":6:10: note: duplicate name here",
+            ":3:21: note: struct declared here",
         });
         case.addError(
             \\const Point = struct { x: i32, y: i32 };
@@ -561,7 +563,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("unions", .{});
+        var case = ctx.exeFromCompiledC("unions", .{}, b);
 
         case.addError(
             \\const U = union {
@@ -595,7 +597,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("enums", .{});
+        var case = ctx.exeFromCompiledC("enums", .{}, b);
 
         case.addError(
             \\const E1 = packed enum { a, b, c };
@@ -635,19 +637,19 @@ pub fn addCases(ctx: *Cases) !void {
             ":6:12: note: consider 'union(enum)' here to make it a tagged union",
         });
 
-        // @enumToInt, @intToEnum, enum literal coercion, field access syntax, comparison, switch
+        // @intFromEnum, @enumFromInt, enum literal coercion, field access syntax, comparison, switch
         case.addCompareOutput(
             \\const Number = enum { One, Two, Three };
             \\
             \\pub export fn main() c_int {
             \\    var number1 = Number.One;
             \\    var number2: Number = .Two;
-            \\    const number3 = @intToEnum(Number, 2);
+            \\    const number3: Number = @enumFromInt(2);
             \\    if (number1 == number2) return 1;
             \\    if (number2 == number3) return 1;
-            \\    if (@enumToInt(number1) != 0) return 1;
-            \\    if (@enumToInt(number2) != 1) return 1;
-            \\    if (@enumToInt(number3) != 2) return 1;
+            \\    if (@intFromEnum(number1) != 0) return 1;
+            \\    if (@intFromEnum(number2) != 1) return 1;
+            \\    if (@intFromEnum(number3) != 2) return 1;
             \\    var x: Number = .Two;
             \\    if (number2 != x) return 1;
             \\    switch (x) {
@@ -721,14 +723,15 @@ pub fn addCases(ctx: *Cases) !void {
             \\    _ = E1.a;
             \\}
         , &.{
-            ":1:28: error: duplicate enum field 'b'",
-            ":1:22: note: other field here",
+            ":1:22: error: duplicate enum field name",
+            ":1:28: note: duplicate field here",
+            ":1:12: note: enum declared here",
         });
 
         case.addError(
             \\pub export fn main() c_int {
             \\    const a = true;
-            \\    _ = @enumToInt(a);
+            \\    _ = @intFromEnum(a);
             \\}
         , &.{
             ":3:20: error: expected enum or tagged union, found 'bool'",
@@ -737,19 +740,19 @@ pub fn addCases(ctx: *Cases) !void {
         case.addError(
             \\pub export fn main() c_int {
             \\    const a = 1;
-            \\    _ = @intToEnum(bool, a);
+            \\    _ = @as(bool, @enumFromInt(a));
             \\}
         , &.{
-            ":3:20: error: expected enum, found 'bool'",
+            ":3:19: error: expected enum, found 'bool'",
         });
 
         case.addError(
             \\const E = enum { a, b, c };
             \\pub export fn main() c_int {
-            \\    _ = @intToEnum(E, 3);
+            \\    _ = @as(E, @enumFromInt(3));
             \\}
         , &.{
-            ":3:9: error: enum 'tmp.E' has no tag with value '3'",
+            ":3:16: error: enum 'tmp.E' has no tag with value '3'",
             ":1:11: note: enum declared here",
         });
 
@@ -837,7 +840,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("shift right and left", .{});
+        var case = ctx.exeFromCompiledC("shift right and left", .{}, b);
         case.addCompareOutput(
             \\pub export fn main() c_int {
             \\    var i: u32 = 16;
@@ -862,7 +865,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("inferred error sets", .{});
+        var case = ctx.exeFromCompiledC("inferred error sets", .{}, b);
 
         case.addCompareOutput(
             \\pub export fn main() c_int {
@@ -883,7 +886,7 @@ pub fn addCases(ctx: *Cases) !void {
 
     {
         // TODO: add u64 tests, ran into issues with the literal generated for std.math.maxInt(u64)
-        var case = ctx.exeFromCompiledC("add and sub wrapping operations", .{});
+        var case = ctx.exeFromCompiledC("add and sub wrapping operations", .{}, b);
         case.addCompareOutput(
             \\pub export fn main() c_int {
             \\    // Addition
@@ -932,7 +935,7 @@ pub fn addCases(ctx: *Cases) !void {
     }
 
     {
-        var case = ctx.exeFromCompiledC("rem", linux_x64);
+        var case = ctx.exeFromCompiledC("rem", linux_x64, b);
         case.addCompareOutput(
             \\fn assert(ok: bool) void {
             \\    if (!ok) unreachable;

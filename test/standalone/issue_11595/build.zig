@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     b.default_step = test_step;
 
     const optimize: std.builtin.OptimizeMode = .Debug;
-    const target: std.zig.CrossTarget = .{};
+    const target = b.host;
 
     if (builtin.os.tag == .windows) {
         // https://github.com/ziglang/zig/issues/12419
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
         "test.c",
     };
 
-    exe.addCSourceFiles(&c_sources, &.{});
+    exe.addCSourceFiles(.{ .files = &c_sources });
     exe.linkLibC();
 
     var i: i32 = 0;

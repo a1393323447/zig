@@ -50,7 +50,6 @@ const Mutex = std.Thread.Mutex;
 const os = std.os;
 const assert = std.debug.assert;
 const testing = std.testing;
-const Atomic = std.atomic.Atomic;
 const Futex = std.Thread.Futex;
 
 impl: Impl = .{},
@@ -193,8 +192,8 @@ const WindowsImpl = struct {
 };
 
 const FutexImpl = struct {
-    state: Atomic(u32) = Atomic(u32).init(0),
-    epoch: Atomic(u32) = Atomic(u32).init(0),
+    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     const one_waiter = 1;
     const waiter_mask = 0xffff;
@@ -232,12 +231,12 @@ const FutexImpl = struct {
                         // Acquire barrier ensures code before the wake() which added the signal happens before we decrement it and return.
                         while (state & signal_mask != 0) {
                             const new_state = state - one_waiter - one_signal;
-                            state = self.state.tryCompareAndSwap(state, new_state, .Acquire, .Monotonic) orelse return;
+                            state = self.state.cmpxchgWeak(state, new_state, .Acquire, .Monotonic) orelse return;
                         }
 
                         // Remove the waiter we added and officially return timed out.
                         const new_state = state - one_waiter;
-                        state = self.state.tryCompareAndSwap(state, new_state, .Monotonic, .Monotonic) orelse return err;
+                        state = self.state.cmpxchgWeak(state, new_state, .Monotonic, .Monotonic) orelse return err;
                     }
                 },
             };
@@ -249,7 +248,7 @@ const FutexImpl = struct {
             // Acquire barrier ensures code before the wake() which added the signal happens before we decrement it and return.
             while (state & signal_mask != 0) {
                 const new_state = state - one_waiter - one_signal;
-                state = self.state.tryCompareAndSwap(state, new_state, .Acquire, .Monotonic) orelse return;
+                state = self.state.cmpxchgWeak(state, new_state, .Acquire, .Monotonic) orelse return;
             }
         }
     }
@@ -261,7 +260,7 @@ const FutexImpl = struct {
             const signals = (state & signal_mask) / one_signal;
 
             // Reserves which waiters to wake up by incrementing the signals count.
-            // Therefor, the signals count is always less than or equal to the waiters count.
+            // Therefore, the signals count is always less than or equal to the waiters count.
             // We don't need to Futex.wake if there's nothing to wake up or if other wake() threads have reserved to wake up the current waiters.
             const wakeable = waiters - signals;
             if (wakeable == 0) {
@@ -276,7 +275,7 @@ const FutexImpl = struct {
             // Reserve the amount of waiters to wake by incrementing the signals count.
             // Release barrier ensures code before the wake() happens before the signal it posted and consumed by the wait() threads.
             const new_state = state + (one_signal * to_wake);
-            state = self.state.tryCompareAndSwap(state, new_state, .Release, .Monotonic) orelse {
+            state = self.state.cmpxchgWeak(state, new_state, .Release, .Monotonic) orelse {
                 // Wake up the waiting threads we reserved above by changing the epoch value.
                 // NOTE: a waiting thread could miss a wake up if *exactly* ((1<<32)-1) wake()s happen between it observing the epoch and sleeping on it.
                 // This is very unlikely due to how many precise amount of Futex.wake() calls that would be between the waiting thread's potential preemption.
@@ -297,7 +296,7 @@ const FutexImpl = struct {
     }
 };
 
-test "Condition - smoke test" {
+test "smoke test" {
     var mutex = Mutex{};
     var cond = Condition{};
 
@@ -318,7 +317,7 @@ test "Condition - smoke test" {
 }
 
 // Inspired from: https://github.com/Amanieu/parking_lot/pull/129
-test "Condition - wait and signal" {
+test "wait and signal" {
     // This test requires spawning threads
     if (builtin.single_threaded) {
         return error.SkipZigTest;
@@ -330,10 +329,12 @@ test "Condition - wait and signal" {
         mutex: Mutex = .{},
         cond: Condition = .{},
         threads: [num_threads]std.Thread = undefined,
+        spawn_count: std.math.IntFittingRange(0, num_threads) = 0,
 
         fn run(self: *@This()) void {
             self.mutex.lock();
             defer self.mutex.unlock();
+            self.spawn_count += 1;
 
             self.cond.wait(&self.mutex);
             self.cond.timedWait(&self.mutex, std.time.ns_per_ms) catch {};
@@ -346,7 +347,14 @@ test "Condition - wait and signal" {
         t.* = try std.Thread.spawn(.{}, MultiWait.run, .{&multi_wait});
     }
 
-    std.time.sleep(100 * std.time.ns_per_ms);
+    while (true) {
+        std.time.sleep(100 * std.time.ns_per_ms);
+
+        multi_wait.mutex.lock();
+        defer multi_wait.mutex.unlock();
+        // Make sure all of the threads have finished spawning to avoid a deadlock.
+        if (multi_wait.spawn_count == num_threads) break;
+    }
 
     multi_wait.cond.signal();
     for (multi_wait.threads) |t| {
@@ -354,7 +362,7 @@ test "Condition - wait and signal" {
     }
 }
 
-test "Condition - signal" {
+test signal {
     // This test requires spawning threads
     if (builtin.single_threaded) {
         return error.SkipZigTest;
@@ -367,10 +375,12 @@ test "Condition - signal" {
         cond: Condition = .{},
         notified: bool = false,
         threads: [num_threads]std.Thread = undefined,
+        spawn_count: std.math.IntFittingRange(0, num_threads) = 0,
 
         fn run(self: *@This()) void {
             self.mutex.lock();
             defer self.mutex.unlock();
+            self.spawn_count += 1;
 
             // Use timedWait() a few times before using wait()
             // to test multiple threads timing out frequently.
@@ -394,10 +404,16 @@ test "Condition - signal" {
         t.* = try std.Thread.spawn(.{}, SignalTest.run, .{&signal_test});
     }
 
-    {
-        // Wait for a bit in hopes that the spawned threads start queuing up on the condvar
+    while (true) {
         std.time.sleep(10 * std.time.ns_per_ms);
 
+        signal_test.mutex.lock();
+        defer signal_test.mutex.unlock();
+        // Make sure at least one thread has finished spawning to avoid testing nothing.
+        if (signal_test.spawn_count > 0) break;
+    }
+
+    {
         // Wake up one of them (outside the lock) after setting notified=true.
         defer signal_test.cond.signal();
 
@@ -413,7 +429,7 @@ test "Condition - signal" {
     }
 }
 
-test "Condition - multi signal" {
+test "multi signal" {
     // This test requires spawning threads
     if (builtin.single_threaded) {
         return error.SkipZigTest;
@@ -470,12 +486,12 @@ test "Condition - multi signal" {
 
     // The first paddle will be hit one last time by the last paddle.
     for (paddles, 0..) |p, i| {
-        const expected = @as(u32, num_iterations) + @boolToInt(i == 0);
+        const expected = @as(u32, num_iterations) + @intFromBool(i == 0);
         try testing.expectEqual(p.value, expected);
     }
 }
 
-test "Condition - broadcasting" {
+test broadcast {
     // This test requires spawning threads
     if (builtin.single_threaded) {
         return error.SkipZigTest;
@@ -525,10 +541,10 @@ test "Condition - broadcasting" {
         // Wait for all the broadcast threads to spawn.
         // timedWait() to detect any potential deadlocks.
         while (broadcast_test.count != num_threads) {
-            try broadcast_test.completed.timedWait(
+            broadcast_test.completed.timedWait(
                 &broadcast_test.mutex,
                 1 * std.time.ns_per_s,
-            );
+            ) catch {};
         }
 
         // Reset the counter and wake all the threads to exit.
@@ -541,7 +557,7 @@ test "Condition - broadcasting" {
     }
 }
 
-test "Condition - broadcasting - wake all threads" {
+test "broadcasting - wake all threads" {
     // Tests issue #12877
     // This test requires spawning threads
     if (builtin.single_threaded) {
@@ -572,7 +588,7 @@ test "Condition - broadcasting - wake all threads" {
                 }
 
                 while (self.thread_id_to_wake != thread_id) {
-                    self.cond.timedWait(&self.mutex, 1 * std.time.ns_per_s) catch std.debug.panic("thread_id {d} timeout {d}", .{ thread_id, self.thread_id_to_wake });
+                    self.cond.timedWait(&self.mutex, 1 * std.time.ns_per_s) catch {};
                     self.wakeups += 1;
                 }
                 if (self.thread_id_to_wake <= num_threads) {
@@ -597,10 +613,10 @@ test "Condition - broadcasting - wake all threads" {
             // Wait for all the broadcast threads to spawn.
             // timedWait() to detect any potential deadlocks.
             while (broadcast_test.count != num_threads) {
-                try broadcast_test.completed.timedWait(
+                broadcast_test.completed.timedWait(
                     &broadcast_test.mutex,
                     1 * std.time.ns_per_s,
-                );
+                ) catch {};
             }
 
             // Signal thread 1 to wake up

@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     b.default_step = test_step;
 
     const optimize: std.builtin.OptimizeMode = .Debug;
-    const target: std.zig.CrossTarget = .{};
+    const target = b.host;
 
     const obj = b.addObject(.{
         .name = "test",
@@ -13,6 +13,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // TODO: actually check the output
+    _ = obj.getEmittedBin();
 
     test_step.dependOn(&obj.step);
 }

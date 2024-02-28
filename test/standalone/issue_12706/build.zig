@@ -1,13 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const CrossTarget = std.zig.CrossTarget;
 
 pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Test it");
     b.default_step = test_step;
 
     const optimize: std.builtin.OptimizeMode = .Debug;
-    const target: std.zig.CrossTarget = .{};
+    const target = b.host;
 
     const exe = b.addExecutable(.{
         .name = "main",
@@ -19,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const c_sources = [_][]const u8{
         "test.c",
     };
-    exe.addCSourceFiles(&c_sources, &.{});
+    exe.addCSourceFiles(.{ .files = &c_sources });
     exe.linkLibC();
 
     const run_cmd = b.addRunArtifact(exe);

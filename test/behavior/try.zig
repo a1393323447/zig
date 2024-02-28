@@ -6,7 +6,7 @@ test "try on error union" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try tryOnErrorUnionImpl();
-    comptime try tryOnErrorUnionImpl();
+    try comptime tryOnErrorUnionImpl();
 }
 
 fn tryOnErrorUnionImpl() !void {
@@ -44,4 +44,25 @@ test "try then not executed with assignment" {
     } else |err| {
         try expect(err == error.ItBroke);
     }
+}
+
+test "`try`ing an if/else expression" {
+    if (builtin.zig_backend == .stage2_x86) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
+
+    const S = struct {
+        fn getError() !void {
+            return error.Test;
+        }
+
+        fn getError2() !void {
+            var a: u8 = 'c';
+            _ = &a;
+            try if (a == 'a') getError() else if (a == 'b') getError() else getError();
+        }
+    };
+
+    try std.testing.expectError(error.Test, S.getError2());
 }

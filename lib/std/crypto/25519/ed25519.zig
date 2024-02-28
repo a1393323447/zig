@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const crypto = std.crypto;
 const debug = std.debug;
@@ -79,8 +78,8 @@ pub const Ed25519 = struct {
             const r_bytes = r.toBytes();
 
             var t: [64]u8 = undefined;
-            mem.copy(u8, t[0..32], &r_bytes);
-            mem.copy(u8, t[32..], &public_key.bytes);
+            t[0..32].* = r_bytes;
+            t[32..].* = public_key.bytes;
             var h = Sha512.init(.{});
             h.update(&t);
 
@@ -200,8 +199,8 @@ pub const Ed25519 = struct {
         /// Return the raw signature (r, s) in little-endian format.
         pub fn toBytes(self: Signature) [encoded_length]u8 {
             var bytes: [encoded_length]u8 = undefined;
-            mem.copy(u8, bytes[0 .. encoded_length / 2], &self.r);
-            mem.copy(u8, bytes[encoded_length / 2 ..], &self.s);
+            bytes[0..Curve.encoded_length].* = self.r;
+            bytes[Curve.encoded_length..].* = self.s;
             return bytes;
         }
 
@@ -209,8 +208,8 @@ pub const Ed25519 = struct {
         /// EdDSA always assumes little-endian.
         pub fn fromBytes(bytes: [encoded_length]u8) Signature {
             return Signature{
-                .r = bytes[0 .. encoded_length / 2].*,
-                .s = bytes[encoded_length / 2 ..].*,
+                .r = bytes[0..Curve.encoded_length].*,
+                .s = bytes[Curve.encoded_length..].*,
             };
         }
 
@@ -260,8 +259,8 @@ pub const Ed25519 = struct {
             const pk_p = Curve.basePoint.clampedMul(az[0..32].*) catch return error.IdentityElement;
             const pk_bytes = pk_p.toBytes();
             var sk_bytes: [SecretKey.encoded_length]u8 = undefined;
-            mem.copy(u8, &sk_bytes, &ss);
-            mem.copy(u8, sk_bytes[seed_length..], &pk_bytes);
+            sk_bytes[0..ss.len].* = ss;
+            sk_bytes[seed_length..].* = pk_bytes;
             return KeyPair{
                 .public_key = PublicKey.fromBytes(pk_bytes) catch unreachable,
                 .secret_key = try SecretKey.fromBytes(sk_bytes),
@@ -276,8 +275,8 @@ pub const Ed25519 = struct {
         pub fn fromSecretKey(secret_key: SecretKey) (NonCanonicalError || EncodingError || IdentityElementError)!KeyPair {
             // It is critical for EdDSA to use the correct public key.
             // In order to enforce this, a SecretKey implicitly includes a copy of the public key.
-            // In Debug mode, we can still afford checking that the public key is correct for extra safety.
-            if (builtin.mode == .Debug) {
+            // With runtime safety, we can still afford checking that the public key is correct.
+            if (std.debug.runtime_safety) {
                 const pk_p = try Curve.fromBytes(secret_key.publicKeyBytes());
                 const recomputed_kp = try create(secret_key.seed());
                 debug.assert(mem.eql(u8, &recomputed_kp.public_key.toBytes(), &pk_p.toBytes()));
@@ -373,7 +372,7 @@ pub const Ed25519 = struct {
         var z_batch: [count]Curve.scalar.CompressedScalar = undefined;
         for (&z_batch) |*z| {
             crypto.random.bytes(z[0..16]);
-            mem.set(u8, z[16..], 0);
+            @memset(z[16..], 0);
         }
 
         var zs_sum = Curve.scalar.zero;
@@ -444,8 +443,8 @@ pub const Ed25519 = struct {
                 };
 
                 var prefix: [64]u8 = undefined;
-                mem.copy(u8, prefix[0..32], h[32..64]);
-                mem.copy(u8, prefix[32..64], blind_h[32..64]);
+                prefix[0..32].* = h[32..64].*;
+                prefix[32..64].* = blind_h[32..64].*;
 
                 const blind_secret_key = BlindSecretKey{
                     .prefix = prefix,
@@ -480,16 +479,10 @@ pub const Ed25519 = struct {
             hx.final(&blind_h);
             return blind_h;
         }
-
-        pub const sign = @compileError("deprecated; use BlindKeyPair.sign instead");
-        pub const unblindPublicKey = @compileError("deprecated; use BlindPublicKey.unblind instead");
     };
-
-    pub const sign = @compileError("deprecated; use KeyPair.sign instead");
-    pub const verify = @compileError("deprecated; use PublicKey.verify instead");
 };
 
-test "ed25519 key pair creation" {
+test "key pair creation" {
     var seed: [32]u8 = undefined;
     _ = try fmt.hexToBytes(seed[0..], "8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     const key_pair = try Ed25519.KeyPair.create(seed);
@@ -498,7 +491,7 @@ test "ed25519 key pair creation" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "{s}", .{std.fmt.fmtSliceHexUpper(&key_pair.public_key.toBytes())}), "2D6F7455D97B4A3A10D7293909D1A4F2058CB9A370E43FA8154BB280DB839083");
 }
 
-test "ed25519 signature" {
+test "signature" {
     var seed: [32]u8 = undefined;
     _ = try fmt.hexToBytes(seed[0..], "8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166");
     const key_pair = try Ed25519.KeyPair.create(seed);
@@ -510,7 +503,7 @@ test "ed25519 signature" {
     try std.testing.expectError(error.SignatureVerificationFailed, sig.verify("TEST", key_pair.public_key));
 }
 
-test "ed25519 batch verification" {
+test "batch verification" {
     var i: usize = 0;
     while (i < 100) : (i += 1) {
         const key_pair = try Ed25519.KeyPair.create(null);
@@ -539,7 +532,7 @@ test "ed25519 batch verification" {
     }
 }
 
-test "ed25519 test vectors" {
+test "test vectors" {
     const Vec = struct {
         msg_hex: *const [64:0]u8,
         public_key_hex: *const [64:0]u8,
@@ -641,7 +634,7 @@ test "ed25519 test vectors" {
     }
 }
 
-test "ed25519 with blind keys" {
+test "with blind keys" {
     const BlindKeyPair = Ed25519.key_blinding.BlindKeyPair;
 
     // Create a standard Ed25519 key pair
@@ -664,7 +657,7 @@ test "ed25519 with blind keys" {
     try std.testing.expectEqualSlices(u8, &pk.toBytes(), &kp.public_key.toBytes());
 }
 
-test "ed25519 signatures with streaming" {
+test "signatures with streaming" {
     const kp = try Ed25519.KeyPair.create(null);
 
     var signer = try kp.signer(null);
@@ -680,7 +673,7 @@ test "ed25519 signatures with streaming" {
     try verifier.verify();
 }
 
-test "ed25519 key pair from secret key" {
+test "key pair from secret key" {
     const kp = try Ed25519.KeyPair.create(null);
     const kp2 = try Ed25519.KeyPair.fromSecretKey(kp.secret_key);
     try std.testing.expectEqualSlices(u8, &kp.secret_key.toBytes(), &kp2.secret_key.toBytes());

@@ -33,7 +33,7 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
     // In the worst case, this is the number of bytes we need to touch
     // to read or write a value, as bits. To calculate for int_bits > 1,
     // set aside 2 bits to touch the first and last bytes, then divide
-    // by 8 to see how many bytes can be filled up inbetween.
+    // by 8 to see how many bytes can be filled up in between.
     const max_io_bits = switch (int_bits) {
         0 => 0,
         1 => 8,
@@ -73,25 +73,25 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             const tail_keep_bits = container_bits - (int_bits + head_keep_bits);
 
             //read bytes as container
-            const value_ptr = @ptrCast(*align(1) const Container, &bytes[start_byte]);
+            const value_ptr = @as(*align(1) const Container, @ptrCast(&bytes[start_byte]));
             var value = value_ptr.*;
 
             if (endian != native_endian) value = @byteSwap(value);
 
             switch (endian) {
-                .Big => {
-                    value <<= @intCast(Shift, head_keep_bits);
-                    value >>= @intCast(Shift, head_keep_bits);
-                    value >>= @intCast(Shift, tail_keep_bits);
+                .big => {
+                    value <<= @as(Shift, @intCast(head_keep_bits));
+                    value >>= @as(Shift, @intCast(head_keep_bits));
+                    value >>= @as(Shift, @intCast(tail_keep_bits));
                 },
-                .Little => {
-                    value <<= @intCast(Shift, tail_keep_bits);
-                    value >>= @intCast(Shift, tail_keep_bits);
-                    value >>= @intCast(Shift, head_keep_bits);
+                .little => {
+                    value <<= @as(Shift, @intCast(tail_keep_bits));
+                    value >>= @as(Shift, @intCast(tail_keep_bits));
+                    value >>= @as(Shift, @intCast(head_keep_bits));
                 },
             }
 
-            return @bitCast(Int, @truncate(UnInt, value));
+            return @as(Int, @bitCast(@as(UnInt, @truncate(value))));
         }
 
         /// Sets the integer at `index` to `val` within the packed data beginning
@@ -115,21 +115,21 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             const head_keep_bits = bit_index - (start_byte * 8);
             const tail_keep_bits = container_bits - (int_bits + head_keep_bits);
             const keep_shift = switch (endian) {
-                .Big => @intCast(Shift, tail_keep_bits),
-                .Little => @intCast(Shift, head_keep_bits),
+                .big => @as(Shift, @intCast(tail_keep_bits)),
+                .little => @as(Shift, @intCast(head_keep_bits)),
             };
 
             //position the bits where they need to be in the container
-            const value = @intCast(Container, @bitCast(UnInt, int)) << keep_shift;
+            const value = @as(Container, @intCast(@as(UnInt, @bitCast(int)))) << keep_shift;
 
             //read existing bytes
-            const target_ptr = @ptrCast(*align(1) Container, &bytes[start_byte]);
+            const target_ptr = @as(*align(1) Container, @ptrCast(&bytes[start_byte]));
             var target = target_ptr.*;
 
             if (endian != native_endian) target = @byteSwap(target);
 
             //zero the bits we want to replace in the existing bytes
-            const inv_mask = @intCast(Container, std.math.maxInt(UnInt)) << keep_shift;
+            const inv_mask = @as(Container, @intCast(std.math.maxInt(UnInt))) << keep_shift;
             const mask = ~inv_mask;
             target &= mask;
 
@@ -156,7 +156,7 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             if (length == 0) return PackedIntSliceEndian(Int, endian).init(new_bytes[0..0], 0);
 
             var new_slice = PackedIntSliceEndian(Int, endian).init(new_bytes, length);
-            new_slice.bit_offset = @intCast(u3, (bit_index - (start_byte * 8)));
+            new_slice.bit_offset = @as(u3, @intCast((bit_index - (start_byte * 8))));
             return new_slice;
         }
 
@@ -298,7 +298,7 @@ pub fn PackedIntSliceEndian(comptime Int: type, comptime endian: Endian) type {
         }
 
         /// Initialize a packed slice using the memory at `bytes`, with `int_count`
-        /// elements. `bytes` must be large enough to accomodate the requested
+        /// elements. `bytes` must be large enough to accommodate the requested
         /// count.
         pub fn init(bytes: []u8, int_count: usize) Self {
             debug.assert(bytes.len >= bytesRequired(int_count));
@@ -388,17 +388,17 @@ test "PackedIntArray" {
 
 test "PackedIntIo" {
     const bytes = [_]u8{ 0b01101_000, 0b01011_110, 0b00011_101 };
-    try testing.expectEqual(@as(u15, 0x2bcd), PackedIntIo(u15, .Little).get(&bytes, 0, 3));
-    try testing.expectEqual(@as(u16, 0xabcd), PackedIntIo(u16, .Little).get(&bytes, 0, 3));
-    try testing.expectEqual(@as(u17, 0x1abcd), PackedIntIo(u17, .Little).get(&bytes, 0, 3));
-    try testing.expectEqual(@as(u18, 0x3abcd), PackedIntIo(u18, .Little).get(&bytes, 0, 3));
+    try testing.expectEqual(@as(u15, 0x2bcd), PackedIntIo(u15, .little).get(&bytes, 0, 3));
+    try testing.expectEqual(@as(u16, 0xabcd), PackedIntIo(u16, .little).get(&bytes, 0, 3));
+    try testing.expectEqual(@as(u17, 0x1abcd), PackedIntIo(u17, .little).get(&bytes, 0, 3));
+    try testing.expectEqual(@as(u18, 0x3abcd), PackedIntIo(u18, .little).get(&bytes, 0, 3));
 }
 
 test "PackedIntArray init" {
     const PackedArray = PackedIntArray(u3, 8);
     var packed_array = PackedArray.init([_]u3{ 0, 1, 2, 3, 4, 5, 6, 7 });
     var i = @as(usize, 0);
-    while (i < packed_array.len) : (i += 1) try testing.expectEqual(@intCast(u3, i), packed_array.get(i));
+    while (i < packed_array.len) : (i += 1) try testing.expectEqual(@as(u3, @intCast(i)), packed_array.get(i));
 }
 
 test "PackedIntArray initAllTo" {
@@ -469,7 +469,7 @@ test "PackedIntSlice of PackedInt(Array/Slice)" {
 
         var i = @as(usize, 0);
         while (i < packed_array.len) : (i += 1) {
-            packed_array.set(i, @intCast(Int, i % limit));
+            packed_array.set(i, @as(Int, @intCast(i % limit)));
         }
 
         //slice of array
@@ -555,16 +555,16 @@ test "PackedInt(Array/Slice) sliceCast" {
     var i = @as(usize, 0);
     while (i < packed_slice_cast_2.len) : (i += 1) {
         const val = switch (native_endian) {
-            .Big => 0b01,
-            .Little => 0b10,
+            .big => 0b01,
+            .little => 0b10,
         };
         try testing.expect(packed_slice_cast_2.get(i) == val);
     }
     i = 0;
     while (i < packed_slice_cast_4.len) : (i += 1) {
         const val = switch (native_endian) {
-            .Big => 0b0101,
-            .Little => 0b1010,
+            .big => 0b0101,
+            .little => 0b1010,
         };
         try testing.expect(packed_slice_cast_4.get(i) == val);
     }
@@ -577,8 +577,8 @@ test "PackedInt(Array/Slice) sliceCast" {
     i = 0;
     while (i < packed_slice_cast_3.len) : (i += 1) {
         const val = switch (native_endian) {
-            .Big => if (i % 2 == 0) @as(u3, 0b111) else @as(u3, 0b000),
-            .Little => if (i % 2 == 0) @as(u3, 0b111) else @as(u3, 0b000),
+            .big => if (i % 2 == 0) @as(u3, 0b111) else @as(u3, 0b000),
+            .little => if (i % 2 == 0) @as(u3, 0b111) else @as(u3, 0b000),
         };
         try testing.expect(packed_slice_cast_3.get(i) == val);
     }
@@ -586,7 +586,7 @@ test "PackedInt(Array/Slice) sliceCast" {
 
 test "PackedInt(Array/Slice)Endian" {
     {
-        const PackedArrayBe = PackedIntArrayEndian(u4, .Big, 8);
+        const PackedArrayBe = PackedIntArrayEndian(u4, .big, 8);
         var packed_array_be = PackedArrayBe.init([_]u4{ 0, 1, 2, 3, 4, 5, 6, 7 });
         try testing.expect(packed_array_be.bytes[0] == 0b00000001);
         try testing.expect(packed_array_be.bytes[1] == 0b00100011);
@@ -596,14 +596,14 @@ test "PackedInt(Array/Slice)Endian" {
             try testing.expect(packed_array_be.get(i) == i);
         }
 
-        var packed_slice_le = packed_array_be.sliceCastEndian(u4, .Little);
+        var packed_slice_le = packed_array_be.sliceCastEndian(u4, .little);
         i = 0;
         while (i < packed_slice_le.len) : (i += 1) {
             const val = if (i % 2 == 0) i + 1 else i - 1;
             try testing.expect(packed_slice_le.get(i) == val);
         }
 
-        var packed_slice_le_shift = packed_array_be.slice(1, 5).sliceCastEndian(u4, .Little);
+        var packed_slice_le_shift = packed_array_be.slice(1, 5).sliceCastEndian(u4, .little);
         i = 0;
         while (i < packed_slice_le_shift.len) : (i += 1) {
             const val = if (i % 2 == 0) i else i + 2;
@@ -612,7 +612,7 @@ test "PackedInt(Array/Slice)Endian" {
     }
 
     {
-        const PackedArrayBe = PackedIntArrayEndian(u11, .Big, 8);
+        const PackedArrayBe = PackedIntArrayEndian(u11, .big, 8);
         var packed_array_be = PackedArrayBe.init([_]u11{ 0, 1, 2, 3, 4, 5, 6, 7 });
         try testing.expect(packed_array_be.bytes[0] == 0b00000000);
         try testing.expect(packed_array_be.bytes[1] == 0b00000000);
@@ -625,7 +625,7 @@ test "PackedInt(Array/Slice)Endian" {
             try testing.expect(packed_array_be.get(i) == i);
         }
 
-        var packed_slice_le = packed_array_be.sliceCastEndian(u11, .Little);
+        var packed_slice_le = packed_array_be.sliceCastEndian(u11, .little);
         try testing.expect(packed_slice_le.get(0) == 0b00000000000);
         try testing.expect(packed_slice_le.get(1) == 0b00010000000);
         try testing.expect(packed_slice_le.get(2) == 0b00000000100);
@@ -635,7 +635,7 @@ test "PackedInt(Array/Slice)Endian" {
         try testing.expect(packed_slice_le.get(6) == 0b10000010000);
         try testing.expect(packed_slice_le.get(7) == 0b00000111001);
 
-        var packed_slice_le_shift = packed_array_be.slice(1, 5).sliceCastEndian(u11, .Little);
+        var packed_slice_le_shift = packed_array_be.slice(1, 5).sliceCastEndian(u11, .little);
         try testing.expect(packed_slice_le_shift.get(0) == 0b00010000000);
         try testing.expect(packed_slice_le_shift.get(1) == 0b00000000100);
         try testing.expect(packed_slice_le_shift.get(2) == 0b00000000000);

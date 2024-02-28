@@ -95,7 +95,7 @@ pub const Params = struct {
     pub fn fromLimits(ops_limit: u32, mem_limit: usize) Self {
         const m = mem_limit / 1024;
         std.debug.assert(m <= max_int);
-        return .{ .t = ops_limit, .m = @intCast(u32, m), .p = 1 };
+        return .{ .t = ops_limit, .m = @as(u32, @intCast(m)), .p = 1 };
     }
 };
 
@@ -110,27 +110,27 @@ fn initHash(
     var parameters: [24]u8 = undefined;
     var tmp: [4]u8 = undefined;
     var b2 = Blake2b512.init(.{});
-    mem.writeIntLittle(u32, parameters[0..4], params.p);
-    mem.writeIntLittle(u32, parameters[4..8], @intCast(u32, dk_len));
-    mem.writeIntLittle(u32, parameters[8..12], params.m);
-    mem.writeIntLittle(u32, parameters[12..16], params.t);
-    mem.writeIntLittle(u32, parameters[16..20], version);
-    mem.writeIntLittle(u32, parameters[20..24], @enumToInt(mode));
+    mem.writeInt(u32, parameters[0..4], params.p, .little);
+    mem.writeInt(u32, parameters[4..8], @as(u32, @intCast(dk_len)), .little);
+    mem.writeInt(u32, parameters[8..12], params.m, .little);
+    mem.writeInt(u32, parameters[12..16], params.t, .little);
+    mem.writeInt(u32, parameters[16..20], version, .little);
+    mem.writeInt(u32, parameters[20..24], @intFromEnum(mode), .little);
     b2.update(&parameters);
-    mem.writeIntLittle(u32, &tmp, @intCast(u32, password.len));
+    mem.writeInt(u32, &tmp, @as(u32, @intCast(password.len)), .little);
     b2.update(&tmp);
     b2.update(password);
-    mem.writeIntLittle(u32, &tmp, @intCast(u32, salt.len));
+    mem.writeInt(u32, &tmp, @as(u32, @intCast(salt.len)), .little);
     b2.update(&tmp);
     b2.update(salt);
     const secret = params.secret orelse "";
     std.debug.assert(secret.len <= max_int);
-    mem.writeIntLittle(u32, &tmp, @intCast(u32, secret.len));
+    mem.writeInt(u32, &tmp, @as(u32, @intCast(secret.len)), .little);
     b2.update(&tmp);
     b2.update(secret);
     const ad = params.ad orelse "";
     std.debug.assert(ad.len <= max_int);
-    mem.writeIntLittle(u32, &tmp, @intCast(u32, ad.len));
+    mem.writeInt(u32, &tmp, @as(u32, @intCast(ad.len)), .little);
     b2.update(&tmp);
     b2.update(ad);
     b2.final(h0[0..Blake2b512.digest_length]);
@@ -140,7 +140,7 @@ fn initHash(
 fn blake2bLong(out: []u8, in: []const u8) void {
     const H = Blake2b512;
     var outlen_bytes: [4]u8 = undefined;
-    mem.writeIntLittle(u32, &outlen_bytes, @intCast(u32, out.len));
+    mem.writeInt(u32, &outlen_bytes, @as(u32, @intCast(out.len)), .little);
 
     var out_buf: [H.digest_length]u8 = undefined;
 
@@ -149,7 +149,7 @@ fn blake2bLong(out: []u8, in: []const u8) void {
         h.update(&outlen_bytes);
         h.update(in);
         h.final(&out_buf);
-        mem.copy(u8, out, out_buf[0..out.len]);
+        @memcpy(out, out_buf[0..out.len]);
         return;
     }
 
@@ -158,19 +158,19 @@ fn blake2bLong(out: []u8, in: []const u8) void {
     h.update(in);
     h.final(&out_buf);
     var out_slice = out;
-    mem.copy(u8, out_slice, out_buf[0 .. H.digest_length / 2]);
+    out_slice[0 .. H.digest_length / 2].* = out_buf[0 .. H.digest_length / 2].*;
     out_slice = out_slice[H.digest_length / 2 ..];
 
     var in_buf: [H.digest_length]u8 = undefined;
     while (out_slice.len > H.digest_length) {
-        mem.copy(u8, &in_buf, &out_buf);
+        in_buf = out_buf;
         H.hash(&in_buf, &out_buf, .{});
-        mem.copy(u8, out_slice, out_buf[0 .. H.digest_length / 2]);
+        out_slice[0 .. H.digest_length / 2].* = out_buf[0 .. H.digest_length / 2].*;
         out_slice = out_slice[H.digest_length / 2 ..];
     }
-    mem.copy(u8, &in_buf, &out_buf);
+    in_buf = out_buf;
     H.hash(&in_buf, &out_buf, .{ .expected_out_bits = out_slice.len * 8 });
-    mem.copy(u8, out_slice, out_buf[0..out_slice.len]);
+    @memcpy(out_slice, out_buf[0..out_slice.len]);
 }
 
 fn initBlocks(
@@ -183,18 +183,18 @@ fn initBlocks(
     var lane: u24 = 0;
     while (lane < threads) : (lane += 1) {
         const j = lane * (memory / threads);
-        mem.writeIntLittle(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane);
+        mem.writeInt(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane, .little);
 
-        mem.writeIntLittle(u32, h0[Blake2b512.digest_length..][0..4], 0);
+        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 0, .little);
         blake2bLong(&block0, h0);
         for (&blocks.items[j + 0], 0..) |*v, i| {
-            v.* = mem.readIntLittle(u64, block0[i * 8 ..][0..8]);
+            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
         }
 
-        mem.writeIntLittle(u32, h0[Blake2b512.digest_length..][0..4], 1);
+        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 1, .little);
         blake2bLong(&block0, h0);
         for (&blocks.items[j + 1], 0..) |*v, i| {
-            v.* = mem.readIntLittle(u64, block0[i * 8 ..][0..8]);
+            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
         }
     }
 }
@@ -292,7 +292,7 @@ fn processSegment(
         in[2] = slice;
         in[3] = memory;
         in[4] = passes;
-        in[5] = @enumToInt(mode);
+        in[5] = @intFromEnum(mode);
     }
     var index: u32 = 0;
     if (n == 0 and slice == 0) {
@@ -391,7 +391,7 @@ fn Rp(a: usize, b: usize, c: usize, d: usize) QuarterRound {
 }
 
 fn fBlaMka(x: u64, y: u64) u64 {
-    const xy = @as(u64, @truncate(u32, x)) * @as(u64, @truncate(u32, y));
+    const xy = @as(u64, @as(u32, @truncate(x))) * @as(u64, @as(u32, @truncate(y)));
     return x +% y +% 2 *% xy;
 }
 
@@ -433,7 +433,7 @@ fn finalize(
     }
     var block: [1024]u8 = undefined;
     for (blocks.items[memory - 1], 0..) |v, i| {
-        mem.writeIntLittle(u64, block[i * 8 ..][0..8], v);
+        mem.writeInt(u64, block[i * 8 ..][0..8], v, .little);
     }
     blake2bLong(out, &block);
 }
@@ -448,7 +448,7 @@ fn indexAlpha(
     lane: u24,
     index: u32,
 ) u32 {
-    var ref_lane = @intCast(u32, rand >> 32) % threads;
+    var ref_lane = @as(u32, @intCast(rand >> 32)) % threads;
     if (n == 0 and slice == 0) {
         ref_lane = lane;
     }
@@ -467,10 +467,10 @@ fn indexAlpha(
     if (index == 0 or lane == ref_lane) {
         m -= 1;
     }
-    var p = @as(u64, @truncate(u32, rand));
+    var p = @as(u64, @as(u32, @truncate(rand)));
     p = (p * p) >> 32;
     p = (p * m) >> 32;
-    return ref_lane * lanes + @intCast(u32, ((s + m - (p + 1)) % lanes));
+    return ref_lane * lanes + @as(u32, @intCast(((s + m - (p + 1)) % lanes)));
 }
 
 /// Derives a key from the password, salt, and argon2 parameters.
@@ -494,7 +494,7 @@ pub fn kdf(
     if (params.t < 1 or params.p < 1) return KdfError.WeakParameters;
 
     var h0 = initHash(password, salt, params, derived_key.len, mode);
-    const memory = math.max(
+    const memory = @max(
         params.m / (sync_points * params.p) * (sync_points * params.p),
         2 * sync_points * params.p,
     );
@@ -565,7 +565,7 @@ const PhcFormatHasher = struct {
         const expected_hash = hash_result.hash.constSlice();
         var hash_buf: [max_hash_len]u8 = undefined;
         if (expected_hash.len > hash_buf.len) return HasherError.InvalidEncoding;
-        var hash = hash_buf[0..expected_hash.len];
+        const hash = hash_buf[0..expected_hash.len];
 
         try kdf(allocator, hash, password, hash_result.salt.constSlice(), params, mode);
         if (!mem.eql(u8, hash, expected_hash)) return HasherError.PasswordVerificationFailed;
@@ -877,7 +877,7 @@ test "kdf" {
             .hash = "1640b932f4b60e272f5d2207b9a9c626ffa1bd88d2349016",
         },
     };
-    inline for (test_vectors) |v| {
+    for (test_vectors) |v| {
         var want: [24]u8 = undefined;
         _ = try std.fmt.hexToBytes(&want, v.hash);
 

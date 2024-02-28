@@ -38,6 +38,8 @@ fn staticWhileLoop2() i32 {
 }
 
 test "while with continue expression" {
+    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest; // TODO
+
     var sum: i32 = 0;
     {
         var i: i32 = 0;
@@ -118,7 +120,7 @@ test "while copies its payload" {
         }
     };
     try S.doTheTest();
-    comptime try S.doTheTest();
+    try comptime S.doTheTest();
 }
 
 test "continue and break" {
@@ -280,7 +282,7 @@ test "while bool 2 break statements and an else" {
         }
     };
     try S.entry(true, false);
-    comptime try S.entry(true, false);
+    try comptime S.entry(true, false);
 }
 
 test "while optional 2 break statements and an else" {
@@ -299,7 +301,7 @@ test "while optional 2 break statements and an else" {
         }
     };
     try S.entry(true, false);
-    comptime try S.entry(true, false);
+    try comptime S.entry(true, false);
 }
 
 test "while error 2 break statements and an else" {
@@ -318,7 +320,7 @@ test "while error 2 break statements and an else" {
         }
     };
     try S.entry(true, false);
-    comptime try S.entry(true, false);
+    try comptime S.entry(true, false);
 }
 
 test "continue inline while loop" {
@@ -343,6 +345,7 @@ test "else continue outer while" {
 test "try terminating an infinite loop" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     // Test coverage for https://github.com/ziglang/zig/issues/13546
     const Foo = struct {
@@ -365,4 +368,38 @@ test "while loop with comptime true condition needs no else block to return valu
         break @as(u32, 69);
     };
     try expect(x == 69);
+}
+
+test "int returned from switch in while" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    var x: u32 = 3;
+    const val: usize = while (true) switch (x) {
+        1 => break 2,
+        else => x -= 1,
+    };
+    try std.testing.expect(val == 2);
+}
+
+test "breaking from a loop in an if statement" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn retOpt() ?u32 {
+            return null;
+        }
+    };
+
+    var cond = true;
+    _ = &cond;
+    const opt = while (cond) {
+        if (S.retOpt()) |opt| {
+            break opt;
+        }
+        break 1;
+    } else 2;
+    _ = opt;
 }

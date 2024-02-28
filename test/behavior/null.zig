@@ -54,7 +54,7 @@ test "maybe return" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try maybeReturnImpl();
-    comptime try maybeReturnImpl();
+    try comptime maybeReturnImpl();
 }
 
 fn maybeReturnImpl() !void {
@@ -84,7 +84,7 @@ test "optional void" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try optionalVoidImpl();
-    comptime try optionalVoidImpl();
+    try comptime optionalVoidImpl();
 }
 
 fn optionalVoidImpl() !void {
@@ -107,7 +107,7 @@ test "optional struct{}" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     _ = try optionalEmptyStructImpl();
-    _ = comptime try optionalEmptyStructImpl();
+    _ = try comptime optionalEmptyStructImpl();
 }
 
 fn optionalEmptyStructImpl() !void {
@@ -133,6 +133,7 @@ test "optional pointer to 0 bit type null value at runtime" {
 
     const EmptyStruct = struct {};
     var x: ?*EmptyStruct = null;
+    _ = &x;
     try expect(x == null);
 }
 

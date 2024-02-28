@@ -5,15 +5,11 @@ const maxInt = std.math.maxInt;
 const iovec = std.os.iovec;
 const iovec_const = std.os.iovec_const;
 
-const status_t = i32;
-
 extern "c" fn _errnop() *c_int;
 
 pub const _errno = _errnop;
 
-pub extern "c" fn find_directory(which: c_int, volume: i32, createIt: bool, path_ptr: [*]u8, length: i32) status_t;
-
-pub extern "c" fn find_path(codePointer: *const u8, baseDirectory: c_int, subPath: [*:0]const u8, pathBuffer: [*:0]u8, bufferSize: usize) status_t;
+pub extern "c" fn find_directory(which: c_int, volume: i32, createIt: bool, path_ptr: [*]u8, length: i32) u64;
 
 pub extern "c" fn find_thread(thread_name: ?*anyopaque) i32;
 
@@ -47,22 +43,6 @@ pub const pthread_attr_t = extern struct {
     __stack_size: i32,
     __guard_size: i32,
     __stack_address: ?*anyopaque,
-};
-
-pub const pthread_mutex_t = extern struct {
-    flags: u32 = 0,
-    lock: i32 = 0,
-    unused: i32 = -42,
-    owner: i32 = -1,
-    owner_count: i32 = 0,
-};
-
-pub const pthread_cond_t = extern struct {
-    flags: u32 = 0,
-    unused: i32 = -42,
-    mutex: ?*anyopaque = null,
-    waiter_count: i32 = 0,
-    lock: i32 = 0,
 };
 
 pub const EAI = enum(c_int) {
@@ -242,16 +222,12 @@ pub const timespec = extern struct {
 };
 
 pub const dirent = extern struct {
-    d_dev: i32,
-    d_pdev: i32,
-    d_ino: i64,
-    d_pino: i64,
-    d_reclen: u16,
-    d_name: [256]u8,
-
-    pub fn reclen(self: dirent) u16 {
-        return self.d_reclen;
-    }
+    dev: i32,
+    pdev: i32,
+    ino: i64,
+    pino: i64,
+    reclen: u16,
+    name: [256]u8,
 };
 
 pub const B_OS_NAME_LENGTH = 32; // OS.h
@@ -412,22 +388,6 @@ pub const CLOCK = struct {
     pub const THREAD_CPUTIME_ID = -3;
 };
 
-pub const MAP = struct {
-    /// mmap() error return code
-    pub const FAILED = @intToPtr(*anyopaque, maxInt(usize));
-    /// changes are seen by others
-    pub const SHARED = 0x01;
-    /// changes are only seen by caller
-    pub const PRIVATE = 0x02;
-    /// require mapping to specified addr
-    pub const FIXED = 0x04;
-    /// no underlying object
-    pub const ANONYMOUS = 0x0008;
-    pub const ANON = ANONYMOUS;
-    /// don't commit memory
-    pub const NORESERVE = 0x10;
-};
-
 pub const MSF = struct {
     pub const ASYNC = 1;
     pub const INVALIDATE = 2;
@@ -443,7 +403,7 @@ pub const W = struct {
     pub const NOWAIT = 0x20;
 
     pub fn EXITSTATUS(s: u32) u8 {
-        return @intCast(u8, s & 0xff);
+        return @as(u8, @intCast(s & 0xff));
     }
 
     pub fn TERMSIG(s: u32) u32 {
@@ -481,9 +441,9 @@ pub const SA = struct {
 };
 
 pub const SIG = struct {
-    pub const ERR = @intToPtr(?Sigaction.handler_fn, maxInt(usize));
-    pub const DFL = @intToPtr(?Sigaction.handler_fn, 0);
-    pub const IGN = @intToPtr(?Sigaction.handler_fn, 1);
+    pub const ERR = @as(?Sigaction.handler_fn, @ptrFromInt(maxInt(usize)));
+    pub const DFL = @as(?Sigaction.handler_fn, @ptrFromInt(0));
+    pub const IGN = @as(?Sigaction.handler_fn, @ptrFromInt(1));
 
     pub const HUP = 1;
     pub const INT = 2;
@@ -529,32 +489,6 @@ pub const F_OK = 0; // test for existence of file
 pub const X_OK = 1; // test for execute or search permission
 pub const W_OK = 2; // test for write permission
 pub const R_OK = 4; // test for read permission
-
-pub const O = struct {
-    pub const RDONLY = 0x0000;
-    pub const WRONLY = 0x0001;
-    pub const RDWR = 0x0002;
-    pub const ACCMODE = 0x0003;
-    pub const RWMASK = ACCMODE;
-
-    pub const EXCL = 0x0100;
-    pub const CREAT = 0x0200;
-    pub const TRUNC = 0x0400;
-    pub const NOCTTY = 0x1000;
-    pub const NOTRAVERSE = 0x2000;
-
-    pub const CLOEXEC = 0x00000040;
-    pub const NONBLOCK = 0x00000080;
-    pub const NDELAY = NONBLOCK;
-    pub const APPEND = 0x00000800;
-    pub const SYNC = 0x00010000;
-    pub const RSYNC = 0x00020000;
-    pub const DSYNC = 0x00040000;
-    pub const NOFOLLOW = 0x00080000;
-    pub const DIRECT = 0x00100000;
-    pub const NOCACHE = DIRECT;
-    pub const DIRECTORY = 0x00200000;
-};
 
 pub const F = struct {
     pub const DUPFD = 0x0001;
@@ -943,14 +877,6 @@ pub const S = struct {
 
 pub const HOST_NAME_MAX = 255;
 
-pub const AT = struct {
-    pub const FDCWD = -1;
-    pub const SYMLINK_NOFOLLOW = 0x01;
-    pub const SYMLINK_FOLLOW = 0x02;
-    pub const REMOVEDIR = 0x04;
-    pub const EACCESS = 0x08;
-};
-
 pub const addrinfo = extern struct {
     flags: i32,
     family: i32,
@@ -1024,40 +950,4 @@ pub const directory_which = enum(c_int) {
     _,
 };
 
-pub const cc_t = u8;
-pub const speed_t = u8;
-pub const tcflag_t = u32;
-
-pub const NCCS = 11;
-
-pub const termios = extern struct {
-    c_iflag: tcflag_t,
-    c_oflag: tcflag_t,
-    c_cflag: tcflag_t,
-    c_lflag: tcflag_t,
-    c_line: cc_t,
-    c_ispeed: speed_t,
-    c_ospeed: speed_t,
-    cc_t: [NCCS]cc_t,
-};
-
 pub const MSG_NOSIGNAL = 0x0800;
-
-pub const SIGEV = struct {
-    pub const NONE = 0;
-    pub const SIGNAL = 1;
-    pub const THREAD = 2;
-};
-
-pub const sigval = extern union {
-    int: c_int,
-    ptr: ?*anyopaque,
-};
-
-pub const sigevent = extern struct {
-    sigev_notify: c_int,
-    sigev_signo: c_int,
-    sigev_value: sigval,
-    sigev_notify_function: ?*const fn (sigval) callconv(.C) void,
-    sigev_notify_attributes: ?*pthread_attr_t,
-};

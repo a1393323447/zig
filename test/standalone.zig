@@ -2,7 +2,7 @@ pub const SimpleCase = struct {
     src_path: []const u8,
     link_libc: bool = false,
     all_modes: bool = false,
-    target: std.zig.CrossTarget = .{},
+    target: std.Target.Query = .{},
     is_test: bool = false,
     is_exe: bool = true,
     /// Run only on this OS.
@@ -58,13 +58,11 @@ pub const simple_cases = [_]SimpleCase{
 
     // Ensure the development tools are buildable. Alphabetically sorted.
     // No need to build `tools/spirv/grammar.zig`.
-    .{ .src_path = "tools/extract-grammar.zig" },
     .{ .src_path = "tools/gen_outline_atomics.zig" },
     .{ .src_path = "tools/gen_spirv_spec.zig" },
     .{ .src_path = "tools/gen_stubs.zig" },
     .{ .src_path = "tools/generate_linux_syscalls.zig" },
     .{ .src_path = "tools/process_headers.zig" },
-    .{ .src_path = "tools/update-license-headers.zig" },
     .{ .src_path = "tools/update-linux-headers.zig" },
     .{ .src_path = "tools/update_clang_options.zig" },
     .{ .src_path = "tools/update_cpu_features.zig" },
@@ -81,14 +79,11 @@ pub const build_cases = [_]BuildCase{
         .build_root = "test/standalone/test_runner_module_imports",
         .import = @import("standalone/test_runner_module_imports/build.zig"),
     },
-    .{
-        .build_root = "test/standalone/issue_13970",
-        .import = @import("standalone/issue_13970/build.zig"),
-    },
-    .{
-        .build_root = "test/standalone/main_pkg_path",
-        .import = @import("standalone/main_pkg_path/build.zig"),
-    },
+    // https://github.com/ziglang/zig/issues/17483
+    //.{
+    //    .build_root = "test/standalone/issue_13970",
+    //    .import = @import("standalone/issue_13970/build.zig"),
+    //},
     .{
         .build_root = "test/standalone/shared_library",
         .import = @import("standalone/shared_library/build.zig"),
@@ -137,16 +132,20 @@ pub const build_cases = [_]BuildCase{
         .build_root = "test/standalone/install_raw_hex",
         .import = @import("standalone/install_raw_hex/build.zig"),
     },
-    // TODO take away EmitOption.emit_to option and make it give a FileSource
+    // https://github.com/ziglang/zig/issues/17484
     //.{
     //    .build_root = "test/standalone/emit_asm_and_bin",
     //    .import = @import("standalone/emit_asm_and_bin/build.zig"),
     //},
-    // TODO take away EmitOption.emit_to option and make it give a FileSource
+    // https://github.com/ziglang/zig/issues/17484
     //.{
     //    .build_root = "test/standalone/issue_12588",
     //    .import = @import("standalone/issue_12588/build.zig"),
     //},
+    .{
+        .build_root = "test/standalone/child_process",
+        .import = @import("standalone/child_process/build.zig"),
+    },
     .{
         .build_root = "test/standalone/embed_generated_file",
         .import = @import("standalone/embed_generated_file/build.zig"),
@@ -176,6 +175,10 @@ pub const build_cases = [_]BuildCase{
         .import = @import("standalone/dep_shared_builtin/build.zig"),
     },
     .{
+        .build_root = "test/standalone/dirname",
+        .import = @import("standalone/dirname/build.zig"),
+    },
+    .{
         .build_root = "test/standalone/empty_env",
         .import = @import("standalone/empty_env/build.zig"),
     },
@@ -188,8 +191,16 @@ pub const build_cases = [_]BuildCase{
         .import = @import("standalone/load_dynamic_library/build.zig"),
     },
     .{
+        .build_root = "test/standalone/windows_resources",
+        .import = @import("standalone/windows_resources/build.zig"),
+    },
+    .{
         .build_root = "test/standalone/windows_spawn",
         .import = @import("standalone/windows_spawn/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/self_exe_symlink",
+        .import = @import("standalone/self_exe_symlink/build.zig"),
     },
     .{
         .build_root = "test/standalone/c_compiler",
@@ -209,10 +220,6 @@ pub const build_cases = [_]BuildCase{
     //    .build_root = "test/standalone/sigpipe",
     //    .import = @import("standalone/sigpipe/build.zig"),
     //},
-    .{
-        .build_root = "test/standalone/issue_13030",
-        .import = @import("standalone/issue_13030/build.zig"),
-    },
     // TODO restore this test
     //.{
     //    .build_root = "test/standalone/options",
@@ -221,6 +228,38 @@ pub const build_cases = [_]BuildCase{
     .{
         .build_root = "test/standalone/strip_empty_loop",
         .import = @import("standalone/strip_empty_loop/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/strip_struct_init",
+        .import = @import("standalone/strip_struct_init/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/cmakedefine",
+        .import = @import("standalone/cmakedefine/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/zerolength_check",
+        .import = @import("standalone/zerolength_check/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/stack_iterator",
+        .import = @import("standalone/stack_iterator/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/coff_dwarf",
+        .import = @import("standalone/coff_dwarf/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/compiler_rt_panic",
+        .import = @import("standalone/compiler_rt_panic/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/ios",
+        .import = @import("standalone/ios/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/depend_on_main_mod",
+        .import = @import("standalone/depend_on_main_mod/build.zig"),
     },
 };
 

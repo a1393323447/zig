@@ -829,7 +829,7 @@ test "error illegal char at position - bad target escape" {
     );
 }
 
-test "error illegal char at position - execting dollar_sign" {
+test "error illegal char at position - expecting dollar_sign" {
     try depTokenizer("$\t",
         \\ERROR: illegal char \x09 at position 1: expecting '$'
     );
@@ -950,7 +950,7 @@ fn printSection(out: anytype, label: []const u8, bytes: []const u8) !void {
 
 fn printLabel(out: anytype, label: []const u8, bytes: []const u8) !void {
     var buf: [80]u8 = undefined;
-    var text = try std.fmt.bufPrint(buf[0..], "{s} {d} bytes ", .{ label, bytes.len });
+    const text = try std.fmt.bufPrint(buf[0..], "{s} {d} bytes ", .{ label, bytes.len });
     try out.writeAll(text);
     var i: usize = text.len;
     const end = 79;
@@ -974,7 +974,7 @@ fn hexDump(out: anytype, bytes: []const u8) !void {
     var line: usize = 0;
     var offset: usize = 0;
     while (line < n16) : (line += 1) {
-        try hexDump16(out, offset, bytes[offset .. offset + 16]);
+        try hexDump16(out, offset, bytes[offset..][0..16]);
         offset += 16;
     }
 
@@ -983,12 +983,12 @@ fn hexDump(out: anytype, bytes: []const u8) !void {
         try printDecValue(out, offset, 8);
         try out.writeAll(":");
         try out.writeAll(" ");
-        var end1 = std.math.min(offset + n, offset + 8);
+        const end1 = @min(offset + n, offset + 8);
         for (bytes[offset..end1]) |b| {
             try out.writeAll(" ");
             try printHexValue(out, b, 2);
         }
-        var end2 = offset + n;
+        const end2 = offset + n;
         if (end2 > end1) {
             try out.writeAll(" ");
             for (bytes[end1..end2]) |b| {

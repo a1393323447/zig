@@ -89,12 +89,11 @@ pub const StreamInterface = struct {
 };
 
 pub fn InitError(comptime Stream: type) type {
-    return std.mem.Allocator.Error || Stream.WriteError || Stream.ReadError || error{
+    return std.mem.Allocator.Error || Stream.WriteError || Stream.ReadError || tls.AlertDescription.Error || error{
         InsufficientEntropy,
         DiskQuota,
         LockViolation,
         NotOpenForWriting,
-        TlsAlert,
         TlsUnexpectedMessage,
         TlsIllegalParameter,
         TlsDecryptFailure,
@@ -133,6 +132,7 @@ pub fn InitError(comptime Stream: type) type {
         InvalidSignature,
         NotSquare,
         NonCanonical,
+        WeakPublicKey,
     };
 }
 
@@ -141,7 +141,7 @@ pub fn InitError(comptime Stream: type) type {
 ///
 /// `host` is only borrowed during this function call.
 pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) InitError(@TypeOf(stream))!Client {
-    const host_len = @intCast(u16, host.len);
+    const host_len: u16 = @intCast(host.len);
 
     var random_buffer: [128]u8 = undefined;
     crypto.random.bytes(&random_buffer);
@@ -167,13 +167,9 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
     }) ++ tls.extension(.signature_algorithms, enum_array(tls.SignatureScheme, &.{
         .ecdsa_secp256r1_sha256,
         .ecdsa_secp384r1_sha384,
-        .ecdsa_secp521r1_sha512,
         .rsa_pss_rsae_sha256,
         .rsa_pss_rsae_sha384,
         .rsa_pss_rsae_sha512,
-        .rsa_pkcs1_sha256,
-        .rsa_pkcs1_sha384,
-        .rsa_pkcs1_sha512,
         .ed25519,
     })) ++ tls.extension(.supported_groups, enum_array(tls.NamedGroup, &.{
         .x25519_kyber768d00,
@@ -181,27 +177,27 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
         .x25519,
     })) ++ tls.extension(
         .key_share,
-        array(1, int2(@enumToInt(tls.NamedGroup.x25519)) ++
+        array(1, int2(@intFromEnum(tls.NamedGroup.x25519)) ++
             array(1, x25519_kp.public_key) ++
-            int2(@enumToInt(tls.NamedGroup.secp256r1)) ++
+            int2(@intFromEnum(tls.NamedGroup.secp256r1)) ++
             array(1, secp256r1_kp.public_key.toUncompressedSec1()) ++
-            int2(@enumToInt(tls.NamedGroup.x25519_kyber768d00)) ++
+            int2(@intFromEnum(tls.NamedGroup.x25519_kyber768d00)) ++
             array(1, x25519_kp.public_key ++ kyber768_kp.public_key.toBytes())),
     ) ++
-        int2(@enumToInt(tls.ExtensionType.server_name)) ++
+        int2(@intFromEnum(tls.ExtensionType.server_name)) ++
         int2(host_len + 5) ++ // byte length of this extension payload
         int2(host_len + 3) ++ // server_name_list byte count
         [1]u8{0x00} ++ // name_type
         int2(host_len);
 
     const extensions_header =
-        int2(@intCast(u16, extensions_payload.len + host_len)) ++
+        int2(@intCast(extensions_payload.len + host_len)) ++
         extensions_payload;
 
     const legacy_compression_methods = 0x0100;
 
     const client_hello =
-        int2(@enumToInt(tls.ProtocolVersion.tls_1_2)) ++
+        int2(@intFromEnum(tls.ProtocolVersion.tls_1_2)) ++
         hello_rand ++
         [1]u8{32} ++ legacy_session_id ++
         cipher_suites ++
@@ -209,14 +205,14 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
         extensions_header;
 
     const out_handshake =
-        [_]u8{@enumToInt(tls.HandshakeType.client_hello)} ++
-        int3(@intCast(u24, client_hello.len + host_len)) ++
+        [_]u8{@intFromEnum(tls.HandshakeType.client_hello)} ++
+        int3(@intCast(client_hello.len + host_len)) ++
         client_hello;
 
     const plaintext_header = [_]u8{
-        @enumToInt(tls.ContentType.handshake),
+        @intFromEnum(tls.ContentType.handshake),
         0x03, 0x01, // legacy_record_version
-    } ++ int2(@intCast(u16, out_handshake.len + host_len)) ++ out_handshake;
+    } ++ int2(@intCast(out_handshake.len + host_len)) ++ out_handshake;
 
     {
         var iovecs = [_]std.os.iovec_const{
@@ -251,8 +247,11 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                 const level = ptd.decode(tls.AlertLevel);
                 const desc = ptd.decode(tls.AlertDescription);
                 _ = level;
-                _ = desc;
-                return error.TlsAlert;
+
+                // if this isn't a error alert, then it's a closure alert, which makes no sense in a handshake
+                try desc.toError();
+                // TODO: handle server-side closures
+                return error.TlsUnexpectedMessage;
             },
             .handshake => {
                 try ptd.ensure(4);
@@ -330,10 +329,10 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     const pk = PublicKey.fromSec1(server_pub_key) catch {
                                         return error.TlsDecryptFailure;
                                     };
-                                    const mul = pk.p.mulPublic(secp256r1_kp.secret_key.bytes, .Big) catch {
+                                    const mul = pk.p.mulPublic(secp256r1_kp.secret_key.bytes, .big) catch {
                                         return error.TlsDecryptFailure;
                                     };
-                                    shared_key = &mul.affineCoordinates().x.toBytes(.Big);
+                                    shared_key = &mul.affineCoordinates().x.toBytes(.big);
                                 },
                                 else => {
                                     return error.TlsIllegalParameter;
@@ -346,14 +345,14 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                 if (!have_shared_key) return error.TlsIllegalParameter;
 
                 const tls_version = if (supported_version == 0) legacy_version else supported_version;
-                if (tls_version != @enumToInt(tls.ProtocolVersion.tls_1_3))
+                if (tls_version != @intFromEnum(tls.ProtocolVersion.tls_1_3))
                     return error.TlsIllegalParameter;
 
                 switch (cipher_suite_tag) {
                     inline .AES_128_GCM_SHA256,
                     .AES_256_GCM_SHA384,
                     .CHACHA20_POLY1305_SHA256,
-                    .AEGIS_256_SHA384,
+                    .AEGIS_256_SHA512,
                     .AEGIS_128L_SHA256,
                     => |tag| {
                         const P = std.meta.TagPayloadByName(tls.HandshakeCipher, @tagName(tag));
@@ -424,7 +423,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
     var handshake_state: HandshakeState = .encrypted_extensions;
     var cleartext_bufs: [2][8000]u8 = undefined;
     var main_cert_pub_key_algo: Certificate.AlgorithmCategory = undefined;
-    var main_cert_pub_key_buf: [300]u8 = undefined;
+    var main_cert_pub_key_buf: [600]u8 = undefined;
     var main_cert_pub_key_len: u16 = undefined;
     const now_sec = std.time.timestamp();
 
@@ -453,18 +452,27 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                         if (ciphertext.len > cleartext_buf.len) return error.TlsRecordOverflow;
                         const cleartext = cleartext_buf[0..ciphertext.len];
                         const auth_tag = record_decoder.array(P.AEAD.tag_length).*;
-                        const V = @Vector(P.AEAD.nonce_length, u8);
-                        const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
-                        const operand: V = pad ++ @bitCast([8]u8, big(read_seq));
+                        const nonce = if (builtin.zig_backend == .stage2_x86_64 and
+                            P.AEAD.nonce_length > comptime std.simd.suggestVectorLength(u8) orelse 1)
+                        nonce: {
+                            var nonce = p.server_handshake_iv;
+                            const operand = std.mem.readInt(u64, nonce[nonce.len - 8 ..], .big);
+                            std.mem.writeInt(u64, nonce[nonce.len - 8 ..], operand ^ read_seq, .big);
+                            break :nonce nonce;
+                        } else nonce: {
+                            const V = @Vector(P.AEAD.nonce_length, u8);
+                            const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
+                            const operand: V = pad ++ @as([8]u8, @bitCast(big(read_seq)));
+                            break :nonce @as(V, p.server_handshake_iv) ^ operand;
+                        };
                         read_seq += 1;
-                        const nonce = @as(V, p.server_handshake_iv) ^ operand;
                         P.AEAD.decrypt(cleartext, ciphertext, auth_tag, record_header, nonce, p.server_handshake_key) catch
                             return error.TlsBadRecordMac;
                         break :c cleartext;
                     },
                 };
 
-                const inner_ct = @intToEnum(tls.ContentType, cleartext[cleartext.len - 1]);
+                const inner_ct: tls.ContentType = @enumFromInt(cleartext[cleartext.len - 1]);
                 if (inner_ct != .handshake) return error.TlsUnexpectedMessage;
 
                 var ctd = tls.Decoder.fromTheirSlice(cleartext[0 .. cleartext.len - 1]);
@@ -489,7 +497,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                 try all_extd.ensure(4);
                                 const et = all_extd.decode(tls.ExtensionType);
                                 const ext_size = all_extd.decode(u16);
-                                var extd = try all_extd.sub(ext_size);
+                                const extd = try all_extd.sub(ext_size);
                                 _ = extd;
                                 switch (et) {
                                     .server_name => {},
@@ -514,11 +522,11 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                             while (!certs_decoder.eof()) {
                                 try certs_decoder.ensure(3);
                                 const cert_size = certs_decoder.decode(u24);
-                                var certd = try certs_decoder.sub(cert_size);
+                                const certd = try certs_decoder.sub(cert_size);
 
                                 const subject_cert: Certificate = .{
                                     .buffer = certd.buf,
-                                    .index = @intCast(u32, certd.idx),
+                                    .index = @intCast(certd.idx),
                                 };
                                 const subject = try subject_cert.parse();
                                 if (cert_index == 0) {
@@ -532,7 +540,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     if (pub_key.len > main_cert_pub_key_buf.len)
                                         return error.CertificatePublicKeyInvalid;
                                     @memcpy(main_cert_pub_key_buf[0..pub_key.len], pub_key);
-                                    main_cert_pub_key_len = @intCast(@TypeOf(main_cert_pub_key_len), pub_key.len);
+                                    main_cert_pub_key_len = @intCast(pub_key.len);
                                 } else {
                                     try prev_cert.verify(subject, now_sec);
                                 }
@@ -550,7 +558,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
 
                                 try certs_decoder.ensure(2);
                                 const total_ext_size = certs_decoder.decode(u16);
-                                var all_extd = try certs_decoder.sub(total_ext_size);
+                                const all_extd = try certs_decoder.sub(total_ext_size);
                                 _ = all_extd;
                             }
                         },
@@ -567,7 +575,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                             try hsd.ensure(sig_len);
                             const encoded_sig = hsd.slice(sig_len);
                             const max_digest_len = 64;
-                            var verify_buffer =
+                            var verify_buffer: [64 + 34 + max_digest_len]u8 =
                                 ([1]u8{0x20} ** 64) ++
                                 "TLS 1.3, server CertificateVerify\x00".* ++
                                 @as([max_digest_len]u8, undefined);
@@ -593,28 +601,37 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     const key = try Ecdsa.PublicKey.fromSec1(main_cert_pub_key);
                                     try sig.verify(verify_bytes, key);
                                 },
-                                .rsa_pss_rsae_sha256 => {
+                                inline .rsa_pss_rsae_sha256,
+                                .rsa_pss_rsae_sha384,
+                                .rsa_pss_rsae_sha512,
+                                => |comptime_scheme| {
                                     if (main_cert_pub_key_algo != .rsaEncryption)
                                         return error.TlsBadSignatureScheme;
 
-                                    const Hash = crypto.hash.sha2.Sha256;
+                                    const Hash = SchemeHash(comptime_scheme);
                                     const rsa = Certificate.rsa;
                                     const components = try rsa.PublicKey.parseDer(main_cert_pub_key);
                                     const exponent = components.exponent;
                                     const modulus = components.modulus;
-                                    var rsa_mem_buf: [512 * 32]u8 = undefined;
-                                    var fba = std.heap.FixedBufferAllocator.init(&rsa_mem_buf);
-                                    const ally = fba.allocator();
                                     switch (modulus.len) {
                                         inline 128, 256, 512 => |modulus_len| {
-                                            const key = try rsa.PublicKey.fromBytes(exponent, modulus, ally);
+                                            const key = try rsa.PublicKey.fromBytes(exponent, modulus);
                                             const sig = rsa.PSSSignature.fromBytes(modulus_len, encoded_sig);
-                                            try rsa.PSSSignature.verify(modulus_len, sig, verify_bytes, key, Hash, ally);
+                                            try rsa.PSSSignature.verify(modulus_len, sig, verify_bytes, key, Hash);
                                         },
                                         else => {
                                             return error.TlsBadRsaSignatureBitCount;
                                         },
                                     }
+                                },
+                                inline .ed25519 => |comptime_scheme| {
+                                    if (main_cert_pub_key_algo != .curveEd25519) return error.TlsBadSignatureScheme;
+                                    const Eddsa = SchemeEddsa(comptime_scheme);
+                                    if (encoded_sig.len != Eddsa.Signature.encoded_length) return error.InvalidEncoding;
+                                    const sig = Eddsa.Signature.fromBytes(encoded_sig[0..Eddsa.Signature.encoded_length].*);
+                                    if (main_cert_pub_key.len != Eddsa.PublicKey.encoded_length) return error.InvalidEncoding;
+                                    const key = try Eddsa.PublicKey.fromBytes(main_cert_pub_key[0..Eddsa.PublicKey.encoded_length].*);
+                                    try sig.verify(verify_bytes, key);
                                 },
                                 else => {
                                     return error.TlsBadSignatureScheme;
@@ -625,7 +642,7 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                             if (handshake_state != .finished) return error.TlsUnexpectedMessage;
                             // This message is to trick buggy proxies into behaving correctly.
                             const client_change_cipher_spec_msg = [_]u8{
-                                @enumToInt(tls.ContentType.change_cipher_spec),
+                                @intFromEnum(tls.ContentType.change_cipher_spec),
                                 0x03, 0x03, // legacy protocol version
                                 0x00, 0x01, // length
                                 0x01,
@@ -641,14 +658,14 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     const handshake_hash = p.transcript_hash.finalResult();
                                     const verify_data = tls.hmac(P.Hmac, &handshake_hash, p.client_finished_key);
                                     const out_cleartext = [_]u8{
-                                        @enumToInt(tls.HandshakeType.finished),
+                                        @intFromEnum(tls.HandshakeType.finished),
                                         0, 0, verify_data.len, // length
-                                    } ++ verify_data ++ [1]u8{@enumToInt(tls.ContentType.handshake)};
+                                    } ++ verify_data ++ [1]u8{@intFromEnum(tls.ContentType.handshake)};
 
                                     const wrapped_len = out_cleartext.len + P.AEAD.tag_length;
 
                                     var finished_msg = [_]u8{
-                                        @enumToInt(tls.ContentType.application_data),
+                                        @intFromEnum(tls.ContentType.application_data),
                                         0x03, 0x03, // legacy protocol version
                                         0, wrapped_len, // byte length of encrypted record
                                     } ++ @as([wrapped_len]u8, undefined);
@@ -660,7 +677,11 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                     P.AEAD.encrypt(ciphertext, auth_tag, &out_cleartext, ad, nonce, p.client_handshake_key);
 
                                     const both_msgs = client_change_cipher_spec_msg ++ finished_msg;
-                                    try stream.writeAll(&both_msgs);
+                                    var both_msgs_vec = [_]std.os.iovec_const{.{
+                                        .iov_base = &both_msgs,
+                                        .iov_len = both_msgs.len,
+                                    }};
+                                    try stream.writevAll(&both_msgs_vec);
 
                                     const client_secret = hkdfExpandLabel(P.Hkdf, p.master_secret, "c ap traffic", &handshake_hash, P.Hash.digest_length);
                                     const server_secret = hkdfExpandLabel(P.Hkdf, p.master_secret, "s ap traffic", &handshake_hash, P.Hash.digest_length);
@@ -680,12 +701,12 @@ pub fn init(stream: anytype, ca_bundle: Certificate.Bundle, host: []const u8) In
                                 .write_seq = 0,
                                 .partial_cleartext_idx = 0,
                                 .partial_ciphertext_idx = 0,
-                                .partial_ciphertext_end = @intCast(u15, leftover.len),
+                                .partial_ciphertext_end = @intCast(leftover.len),
                                 .received_close_notify = false,
                                 .application_cipher = app_cipher,
                                 .partially_read_buffer = undefined,
                             };
-                            mem.copy(u8, &client.partially_read_buffer, leftover);
+                            @memcpy(client.partially_read_buffer[0..leftover.len], leftover);
                             return client;
                         },
                         else => {
@@ -794,14 +815,13 @@ fn prepareCiphertextRecord(
     switch (c.application_cipher) {
         inline else => |*p| {
             const P = @TypeOf(p.*);
-            const V = @Vector(P.AEAD.nonce_length, u8);
             const overhead_len = tls.record_header_len + P.AEAD.tag_length + 1;
             const close_notify_alert_reserved = tls.close_notify_alert.len + overhead_len;
             while (true) {
-                const encrypted_content_len = @intCast(u16, @min(
-                    @min(bytes.len - bytes_i, max_ciphertext_len - 1),
-                    ciphertext_buf.len - close_notify_alert_reserved -
-                        overhead_len - ciphertext_end,
+                const encrypted_content_len: u16 = @intCast(@min(
+                    @min(bytes.len - bytes_i, tls.max_cipertext_inner_record_len),
+                    ciphertext_buf.len -|
+                        (close_notify_alert_reserved + overhead_len + ciphertext_end),
                 ));
                 if (encrypted_content_len == 0) return .{
                     .iovec_end = iovec_end,
@@ -809,8 +829,8 @@ fn prepareCiphertextRecord(
                     .overhead_len = overhead_len,
                 };
 
-                mem.copy(u8, &cleartext_buf, bytes[bytes_i..][0..encrypted_content_len]);
-                cleartext_buf[encrypted_content_len] = @enumToInt(inner_content_type);
+                @memcpy(cleartext_buf[0..encrypted_content_len], bytes[bytes_i..][0..encrypted_content_len]);
+                cleartext_buf[encrypted_content_len] = @intFromEnum(inner_content_type);
                 bytes_i += encrypted_content_len;
                 const ciphertext_len = encrypted_content_len + 1;
                 const cleartext = cleartext_buf[0..ciphertext_len];
@@ -818,18 +838,28 @@ fn prepareCiphertextRecord(
                 const record_start = ciphertext_end;
                 const ad = ciphertext_buf[ciphertext_end..][0..5];
                 ad.* =
-                    [_]u8{@enumToInt(tls.ContentType.application_data)} ++
-                    int2(@enumToInt(tls.ProtocolVersion.tls_1_2)) ++
+                    [_]u8{@intFromEnum(tls.ContentType.application_data)} ++
+                    int2(@intFromEnum(tls.ProtocolVersion.tls_1_2)) ++
                     int2(ciphertext_len + P.AEAD.tag_length);
                 ciphertext_end += ad.len;
                 const ciphertext = ciphertext_buf[ciphertext_end..][0..ciphertext_len];
                 ciphertext_end += ciphertext_len;
                 const auth_tag = ciphertext_buf[ciphertext_end..][0..P.AEAD.tag_length];
                 ciphertext_end += auth_tag.len;
-                const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
-                const operand: V = pad ++ @bitCast([8]u8, big(c.write_seq));
+                const nonce = if (builtin.zig_backend == .stage2_x86_64 and
+                    P.AEAD.nonce_length > comptime std.simd.suggestVectorLength(u8) orelse 1)
+                nonce: {
+                    var nonce = p.client_iv;
+                    const operand = std.mem.readInt(u64, nonce[nonce.len - 8 ..], .big);
+                    std.mem.writeInt(u64, nonce[nonce.len - 8 ..], operand ^ c.write_seq, .big);
+                    break :nonce nonce;
+                } else nonce: {
+                    const V = @Vector(P.AEAD.nonce_length, u8);
+                    const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
+                    const operand: V = pad ++ @as([8]u8, @bitCast(big(c.write_seq)));
+                    break :nonce @as(V, p.client_iv) ^ operand;
+                };
                 c.write_seq += 1; // TODO send key_update on overflow
-                const nonce = @as(V, p.client_iv) ^ operand;
                 P.AEAD.encrypt(ciphertext, auth_tag, cleartext, ad, nonce, p.client_key);
 
                 const record = ciphertext_buf[record_start..ciphertext_end];
@@ -879,7 +909,7 @@ pub fn readAll(c: *Client, stream: anytype, buffer: []u8) !usize {
 /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
 /// order to handle partial reads from the underlying stream layer.
 pub fn readv(c: *Client, stream: anytype, iovecs: []std.os.iovec) !usize {
-    return readvAtLeast(c, stream, iovecs);
+    return readvAtLeast(c, stream, iovecs, 1);
 }
 
 /// Receives TLS-encrypted data from `stream`, which must conform to `StreamInterface`.
@@ -921,10 +951,12 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
     // Give away the buffered cleartext we have, if any.
     const partial_cleartext = c.partially_read_buffer[c.partial_cleartext_idx..c.partial_ciphertext_idx];
     if (partial_cleartext.len > 0) {
-        const amt = @intCast(u15, vp.put(partial_cleartext));
+        const amt: u15 = @intCast(vp.put(partial_cleartext));
         c.partial_cleartext_idx += amt;
 
-        if (c.partial_ciphertext_end == c.partial_ciphertext_idx) {
+        if (c.partial_cleartext_idx == c.partial_ciphertext_idx and
+            c.partial_ciphertext_end == c.partial_ciphertext_idx)
+        {
             // The buffer is now empty.
             c.partial_cleartext_idx = 0;
             c.partial_ciphertext_idx = 0;
@@ -935,7 +967,7 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
             c.partial_ciphertext_end = 0;
             assert(vp.total == amt);
             return amt;
-        } else if (amt <= partial_cleartext.len) {
+        } else if (amt > 0) {
             // We don't need more data, so don't call read.
             assert(vp.total == amt);
             return amt;
@@ -957,6 +989,13 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
     // The amount of the user's buffer that will be used to give cleartext. The
     // beginning of the buffer will be used for such purposes.
     const cleartext_buf_len = free_size - ciphertext_buf_len;
+
+    // Recoup `partially_read_buffer space`. This is necessary because it is assumed
+    // below that `frag0` is big enough to hold at least one record.
+    limitedOverlapCopy(c.partially_read_buffer[0..c.partial_ciphertext_end], c.partial_ciphertext_idx);
+    c.partial_ciphertext_end -= c.partial_ciphertext_idx;
+    c.partial_ciphertext_idx = 0;
+    c.partial_cleartext_idx = 0;
     const first_iov = c.partially_read_buffer[c.partial_ciphertext_end..];
 
     var ask_iovecs_buf: [2]std.os.iovec = .{
@@ -970,8 +1009,8 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
         },
     };
 
-    // Cleartext capacity of output buffer, in records, rounded up.
-    const buf_cap = (cleartext_buf_len +| (max_ciphertext_len - 1)) / max_ciphertext_len;
+    // Cleartext capacity of output buffer, in records. Minimum one full record.
+    const buf_cap = @max(cleartext_buf_len / max_ciphertext_len, 1);
     const wanted_read_len = buf_cap * (max_ciphertext_len + tls.record_header_len);
     const ask_len = @max(wanted_read_len, cleartext_stack_buffer.len);
     const ask_iovecs = limitVecs(&ask_iovecs_buf, ask_len);
@@ -1029,19 +1068,19 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
             if (frag1.len < second_len)
                 return finishRead2(c, first, frag1, vp.total);
 
-            mem.copy(u8, frag[0..in], first);
-            mem.copy(u8, frag[first.len..], frag1[0..second_len]);
+            limitedOverlapCopy(frag, in);
+            @memcpy(frag[first.len..][0..second_len], frag1[0..second_len]);
             frag = frag[0..full_record_len];
             frag1 = frag1[second_len..];
             in = 0;
             continue;
         }
-        const ct = @intToEnum(tls.ContentType, frag[in]);
+        const ct: tls.ContentType = @enumFromInt(frag[in]);
         in += 1;
-        const legacy_version = mem.readIntBig(u16, frag[in..][0..2]);
+        const legacy_version = mem.readInt(u16, frag[in..][0..2], .big);
         in += 2;
         _ = legacy_version;
-        const record_len = mem.readIntBig(u16, frag[in..][0..2]);
+        const record_len = mem.readInt(u16, frag[in..][0..2], .big);
         if (record_len > max_ciphertext_len) return error.TlsRecordOverflow;
         in += 2;
         const end = in + record_len;
@@ -1059,8 +1098,8 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
             if (frag1.len < second_len)
                 return finishRead2(c, first, frag1, vp.total);
 
-            mem.copy(u8, frag[0..in], first);
-            mem.copy(u8, frag[first.len..], frag1[0..second_len]);
+            limitedOverlapCopy(frag, in);
+            @memcpy(frag[first.len..][0..second_len], frag1[0..second_len]);
             frag = frag[0..full_record_len];
             frag1 = frag1[second_len..];
             in = 0;
@@ -1069,25 +1108,36 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
         switch (ct) {
             .alert => {
                 if (in + 2 > frag.len) return error.TlsDecodeError;
-                const level = @intToEnum(tls.AlertLevel, frag[in]);
-                const desc = @intToEnum(tls.AlertDescription, frag[in + 1]);
+                const level: tls.AlertLevel = @enumFromInt(frag[in]);
+                const desc: tls.AlertDescription = @enumFromInt(frag[in + 1]);
                 _ = level;
-                _ = desc;
-                return error.TlsAlert;
+
+                try desc.toError();
+                // TODO: handle server-side closures
+                return error.TlsUnexpectedMessage;
             },
             .application_data => {
                 const cleartext = switch (c.application_cipher) {
                     inline else => |*p| c: {
                         const P = @TypeOf(p.*);
-                        const V = @Vector(P.AEAD.nonce_length, u8);
                         const ad = frag[in - 5 ..][0..5];
                         const ciphertext_len = record_len - P.AEAD.tag_length;
                         const ciphertext = frag[in..][0..ciphertext_len];
                         in += ciphertext_len;
                         const auth_tag = frag[in..][0..P.AEAD.tag_length].*;
-                        const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
-                        const operand: V = pad ++ @bitCast([8]u8, big(c.read_seq));
-                        const nonce: [P.AEAD.nonce_length]u8 = @as(V, p.server_iv) ^ operand;
+                        const nonce = if (builtin.zig_backend == .stage2_x86_64 and
+                            P.AEAD.nonce_length > comptime std.simd.suggestVectorLength(u8) orelse 1)
+                        nonce: {
+                            var nonce = p.server_iv;
+                            const operand = std.mem.readInt(u64, nonce[nonce.len - 8 ..], .big);
+                            std.mem.writeInt(u64, nonce[nonce.len - 8 ..], operand ^ c.read_seq, .big);
+                            break :nonce nonce;
+                        } else nonce: {
+                            const V = @Vector(P.AEAD.nonce_length, u8);
+                            const pad = [1]u8{0} ** (P.AEAD.nonce_length - 8);
+                            const operand: V = pad ++ @as([8]u8, @bitCast(big(c.read_seq)));
+                            break :nonce @as(V, p.server_iv) ^ operand;
+                        };
                         const out_buf = vp.peek();
                         const cleartext_buf = if (ciphertext.len <= out_buf.len)
                             out_buf
@@ -1102,25 +1152,28 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
 
                 c.read_seq = try std.math.add(u64, c.read_seq, 1);
 
-                const inner_ct = @intToEnum(tls.ContentType, cleartext[cleartext.len - 1]);
+                const inner_ct: tls.ContentType = @enumFromInt(cleartext[cleartext.len - 1]);
                 switch (inner_ct) {
                     .alert => {
-                        const level = @intToEnum(tls.AlertLevel, cleartext[0]);
-                        const desc = @intToEnum(tls.AlertDescription, cleartext[1]);
+                        const level: tls.AlertLevel = @enumFromInt(cleartext[0]);
+                        const desc: tls.AlertDescription = @enumFromInt(cleartext[1]);
                         if (desc == .close_notify) {
                             c.received_close_notify = true;
                             c.partial_ciphertext_end = c.partial_ciphertext_idx;
                             return vp.total;
                         }
                         _ = level;
-                        return error.TlsAlert;
+
+                        try desc.toError();
+                        // TODO: handle server-side closures
+                        return error.TlsUnexpectedMessage;
                     },
                     .handshake => {
                         var ct_i: usize = 0;
                         while (true) {
-                            const handshake_type = @intToEnum(tls.HandshakeType, cleartext[ct_i]);
+                            const handshake_type: tls.HandshakeType = @enumFromInt(cleartext[ct_i]);
                             ct_i += 1;
-                            const handshake_len = mem.readIntBig(u24, cleartext[ct_i..][0..3]);
+                            const handshake_len = mem.readInt(u24, cleartext[ct_i..][0..3], .big);
                             ct_i += 3;
                             const next_handshake_i = ct_i + handshake_len;
                             if (next_handshake_i > cleartext.len - 1)
@@ -1142,7 +1195,7 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
                                     }
                                     c.read_seq = 0;
 
-                                    switch (@intToEnum(tls.KeyUpdateRequest, handshake[0])) {
+                                    switch (@as(tls.KeyUpdateRequest, @enumFromInt(handshake[0]))) {
                                         .update_requested => {
                                             switch (c.application_cipher) {
                                                 inline else => |*p| {
@@ -1176,16 +1229,18 @@ pub fn readvAdvanced(c: *Client, stream: anytype, iovecs: []const std.os.iovec) 
                             if (c.partial_ciphertext_idx > c.partial_cleartext_idx) {
                                 // We have already run out of room in iovecs. Continue
                                 // appending to `partially_read_buffer`.
-                                const dest = c.partially_read_buffer[c.partial_ciphertext_idx..];
-                                mem.copy(u8, dest, msg);
-                                c.partial_ciphertext_idx = @intCast(@TypeOf(c.partial_ciphertext_idx), c.partial_ciphertext_idx + msg.len);
+                                @memcpy(
+                                    c.partially_read_buffer[c.partial_ciphertext_idx..][0..msg.len],
+                                    msg,
+                                );
+                                c.partial_ciphertext_idx = @intCast(c.partial_ciphertext_idx + msg.len);
                             } else {
                                 const amt = vp.put(msg);
                                 if (amt < msg.len) {
                                     const rest = msg[amt..];
                                     c.partial_cleartext_idx = 0;
-                                    c.partial_ciphertext_idx = @intCast(@TypeOf(c.partial_ciphertext_idx), rest.len);
-                                    mem.copy(u8, &c.partially_read_buffer, rest);
+                                    c.partial_ciphertext_idx = @intCast(rest.len);
+                                    @memcpy(c.partially_read_buffer[0..rest.len], rest);
                                 }
                             }
                         } else {
@@ -1212,31 +1267,45 @@ fn finishRead(c: *Client, frag: []const u8, in: usize, out: usize) usize {
     const saved_buf = frag[in..];
     if (c.partial_ciphertext_idx > c.partial_cleartext_idx) {
         // There is cleartext at the beginning already which we need to preserve.
-        c.partial_ciphertext_end = @intCast(@TypeOf(c.partial_ciphertext_end), c.partial_ciphertext_idx + saved_buf.len);
-        mem.copy(u8, c.partially_read_buffer[c.partial_ciphertext_idx..], saved_buf);
+        c.partial_ciphertext_end = @intCast(c.partial_ciphertext_idx + saved_buf.len);
+        @memcpy(c.partially_read_buffer[c.partial_ciphertext_idx..][0..saved_buf.len], saved_buf);
     } else {
         c.partial_cleartext_idx = 0;
         c.partial_ciphertext_idx = 0;
-        c.partial_ciphertext_end = @intCast(@TypeOf(c.partial_ciphertext_end), saved_buf.len);
-        mem.copy(u8, &c.partially_read_buffer, saved_buf);
+        c.partial_ciphertext_end = @intCast(saved_buf.len);
+        @memcpy(c.partially_read_buffer[0..saved_buf.len], saved_buf);
     }
     return out;
 }
 
+/// Note that `first` usually overlaps with `c.partially_read_buffer`.
 fn finishRead2(c: *Client, first: []const u8, frag1: []const u8, out: usize) usize {
     if (c.partial_ciphertext_idx > c.partial_cleartext_idx) {
         // There is cleartext at the beginning already which we need to preserve.
-        c.partial_ciphertext_end = @intCast(@TypeOf(c.partial_ciphertext_end), c.partial_ciphertext_idx + first.len + frag1.len);
-        mem.copy(u8, c.partially_read_buffer[c.partial_ciphertext_idx..], first);
-        mem.copy(u8, c.partially_read_buffer[c.partial_ciphertext_idx + first.len ..], frag1);
+        c.partial_ciphertext_end = @intCast(c.partial_ciphertext_idx + first.len + frag1.len);
+        // TODO: eliminate this call to copyForwards
+        std.mem.copyForwards(u8, c.partially_read_buffer[c.partial_ciphertext_idx..][0..first.len], first);
+        @memcpy(c.partially_read_buffer[c.partial_ciphertext_idx + first.len ..][0..frag1.len], frag1);
     } else {
         c.partial_cleartext_idx = 0;
         c.partial_ciphertext_idx = 0;
-        c.partial_ciphertext_end = @intCast(@TypeOf(c.partial_ciphertext_end), first.len + frag1.len);
-        mem.copy(u8, &c.partially_read_buffer, first);
-        mem.copy(u8, c.partially_read_buffer[first.len..], frag1);
+        c.partial_ciphertext_end = @intCast(first.len + frag1.len);
+        // TODO: eliminate this call to copyForwards
+        std.mem.copyForwards(u8, c.partially_read_buffer[0..first.len], first);
+        @memcpy(c.partially_read_buffer[first.len..][0..frag1.len], frag1);
     }
     return out;
+}
+
+fn limitedOverlapCopy(frag: []u8, in: usize) void {
+    const first = frag[in..];
+    if (first.len <= in) {
+        // A single, non-overlapping memcpy suffices.
+        @memcpy(frag[0..first.len], first);
+    } else {
+        // One memcpy call would overlap, so just do this instead.
+        std.mem.copyForwards(u8, frag, first);
+    }
 }
 
 fn straddleByte(s1: []const u8, s2: []const u8, index: usize) u8 {
@@ -1252,8 +1321,8 @@ const native_endian = builtin.cpu.arch.endian();
 
 inline fn big(x: anytype) @TypeOf(x) {
     return switch (native_endian) {
-        .Big => x,
-        .Little => @byteSwap(x),
+        .big => x,
+        .little => @byteSwap(x),
     };
 }
 
@@ -1261,7 +1330,22 @@ fn SchemeEcdsa(comptime scheme: tls.SignatureScheme) type {
     return switch (scheme) {
         .ecdsa_secp256r1_sha256 => crypto.sign.ecdsa.EcdsaP256Sha256,
         .ecdsa_secp384r1_sha384 => crypto.sign.ecdsa.EcdsaP384Sha384,
-        .ecdsa_secp521r1_sha512 => crypto.sign.ecdsa.EcdsaP512Sha512,
+        else => @compileError("bad scheme"),
+    };
+}
+
+fn SchemeHash(comptime scheme: tls.SignatureScheme) type {
+    return switch (scheme) {
+        .rsa_pss_rsae_sha256 => crypto.hash.sha2.Sha256,
+        .rsa_pss_rsae_sha384 => crypto.hash.sha2.Sha384,
+        .rsa_pss_rsae_sha512 => crypto.hash.sha2.Sha512,
+        else => @compileError("bad scheme"),
+    };
+}
+
+fn SchemeEddsa(comptime scheme: tls.SignatureScheme) type {
+    return switch (scheme) {
+        .ed25519 => crypto.sign.Ed25519,
         else => @compileError("bad scheme"),
     };
 }
@@ -1282,7 +1366,7 @@ const VecPut = struct {
             const v = vp.iovecs[vp.idx];
             const dest = v.iov_base[vp.off..v.iov_len];
             const src = bytes[bytes_i..][0..@min(dest.len, bytes.len - bytes_i)];
-            mem.copy(u8, dest, src);
+            @memcpy(dest[0..src.len], src);
             bytes_i += src.len;
             vp.off += src.len;
             if (vp.off >= v.iov_len) {
@@ -1330,18 +1414,15 @@ const VecPut = struct {
 
 /// Limit iovecs to a specific byte size.
 fn limitVecs(iovecs: []std.os.iovec, len: usize) []std.os.iovec {
-    var vec_i: usize = 0;
     var bytes_left: usize = len;
-    while (true) {
-        if (bytes_left >= iovecs[vec_i].iov_len) {
-            bytes_left -= iovecs[vec_i].iov_len;
-            vec_i += 1;
-            if (vec_i == iovecs.len or bytes_left == 0) return iovecs[0..vec_i];
-            continue;
+    for (iovecs, 0..) |*iovec, vec_i| {
+        if (bytes_left <= iovec.iov_len) {
+            iovec.iov_len = bytes_left;
+            return iovecs[0 .. vec_i + 1];
         }
-        iovecs[vec_i].iov_len = bytes_left;
-        return iovecs[0..vec_i];
+        bytes_left -= iovec.iov_len;
     }
+    return iovecs;
 }
 
 /// The priority order here is chosen based on what crypto algorithms Zig has
@@ -1368,7 +1449,7 @@ fn limitVecs(iovecs: []std.os.iovec, len: usize) []std.os.iovec {
 const cipher_suites = if (crypto.core.aes.has_hardware_support)
     enum_array(tls.CipherSuite, &.{
         .AEGIS_128L_SHA256,
-        .AEGIS_256_SHA384,
+        .AEGIS_256_SHA512,
         .AES_128_GCM_SHA256,
         .AES_256_GCM_SHA384,
         .CHACHA20_POLY1305_SHA256,
@@ -1377,7 +1458,7 @@ else
     enum_array(tls.CipherSuite, &.{
         .CHACHA20_POLY1305_SHA256,
         .AEGIS_128L_SHA256,
-        .AEGIS_256_SHA384,
+        .AEGIS_256_SHA512,
         .AES_128_GCM_SHA256,
         .AES_256_GCM_SHA384,
     });

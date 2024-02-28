@@ -9,17 +9,17 @@ pub fn build(b: *std.Build) void {
     const foo = b.addStaticLibrary(.{
         .name = "foo",
         .optimize = optimize,
-        .target = .{},
+        .target = b.host,
     });
-    foo.addCSourceFile("foo.c", &[_][]const u8{});
-    foo.addIncludePath(".");
+    foo.addCSourceFile(.{ .file = .{ .path = "foo.c" }, .flags = &[_][]const u8{} });
+    foo.addIncludePath(.{ .path = "." });
 
     const test_exe = b.addTest(.{
         .root_source_file = .{ .path = "foo.zig" },
         .optimize = optimize,
     });
     test_exe.linkLibrary(foo);
-    test_exe.addIncludePath(".");
+    test_exe.addIncludePath(.{ .path = "." });
 
     test_step.dependOn(&b.addRunArtifact(test_exe).step);
 }

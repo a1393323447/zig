@@ -1,17 +1,16 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const CheckFileStep = std.Build.CheckFileStep;
 
 pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Test it");
     b.default_step = test_step;
 
-    const target = .{
+    const target = b.resolveTargetQuery(.{
         .cpu_arch = .thumb,
         .cpu_model = .{ .explicit = &std.Target.arm.cpu.cortex_m4 },
         .os_tag = .freestanding,
         .abi = .gnueabihf,
-    };
+    });
 
     const optimize: std.builtin.OptimizeMode = .Debug;
 

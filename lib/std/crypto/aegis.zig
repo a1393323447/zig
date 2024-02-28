@@ -17,10 +17,11 @@
 //! https://datatracker.ietf.org/doc/draft-irtf-cfrg-aegis-aead/
 
 const std = @import("std");
+const crypto = std.crypto;
 const mem = std.mem;
 const assert = std.debug.assert;
-const AesBlock = std.crypto.core.aes.Block;
-const AuthenticationError = std.crypto.errors.AuthenticationError;
+const AesBlock = crypto.core.aes.Block;
+const AuthenticationError = crypto.errors.AuthenticationError;
 
 /// AEGIS-128L with a 128-bit authentication tag.
 pub const Aegis128L = Aegis128LGeneric(128);
@@ -105,8 +106,8 @@ const State128L = struct {
     fn mac(state: *State128L, comptime tag_bits: u9, adlen: usize, mlen: usize) [tag_bits / 8]u8 {
         const blocks = &state.blocks;
         var sizes: [16]u8 = undefined;
-        mem.writeIntLittle(u64, sizes[0..8], adlen * 8);
-        mem.writeIntLittle(u64, sizes[8..16], mlen * 8);
+        mem.writeInt(u64, sizes[0..8], adlen * 8, .little);
+        mem.writeInt(u64, sizes[8..16], mlen * 8, .little);
         const tmp = AesBlock.fromBytes(&sizes).xorBlocks(blocks[2]);
         var i: usize = 0;
         while (i < 7) : (i += 1) {
@@ -152,8 +153,8 @@ fn Aegis128LGeneric(comptime tag_bits: u9) type {
                 state.absorb(ad[i..][0..32]);
             }
             if (ad.len % 32 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. ad.len % 32], ad[i .. i + ad.len % 32]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. ad.len % 32], ad[i..][0 .. ad.len % 32]);
                 state.absorb(&src);
             }
             i = 0;
@@ -161,20 +162,23 @@ fn Aegis128LGeneric(comptime tag_bits: u9) type {
                 state.enc(c[i..][0..32], m[i..][0..32]);
             }
             if (m.len % 32 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. m.len % 32], m[i .. i + m.len % 32]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. m.len % 32], m[i..][0 .. m.len % 32]);
                 state.enc(&dst, &src);
-                mem.copy(u8, c[i .. i + m.len % 32], dst[0 .. m.len % 32]);
+                @memcpy(c[i..][0 .. m.len % 32], dst[0 .. m.len % 32]);
             }
             tag.* = state.mac(tag_bits, ad.len, m.len);
         }
 
-        /// m: message: output buffer should be of size c.len
-        /// c: ciphertext
-        /// tag: authentication tag
-        /// ad: Associated Data
-        /// npub: public nonce
-        /// k: private key
+        /// `m`: Message
+        /// `c`: Ciphertext
+        /// `tag`: Authentication tag
+        /// `ad`: Associated data
+        /// `npub`: Public nonce
+        /// `k`: Private key
+        /// Asserts `c.len == m.len`.
+        ///
+        /// Contents of `m` are undefined if an error is returned.
         pub fn decrypt(m: []u8, c: []const u8, tag: [tag_length]u8, ad: []const u8, npub: [nonce_length]u8, key: [key_length]u8) AuthenticationError!void {
             assert(c.len == m.len);
             var state = State128L.init(key, npub);
@@ -185,8 +189,8 @@ fn Aegis128LGeneric(comptime tag_bits: u9) type {
                 state.absorb(ad[i..][0..32]);
             }
             if (ad.len % 32 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. ad.len % 32], ad[i .. i + ad.len % 32]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. ad.len % 32], ad[i..][0 .. ad.len % 32]);
                 state.absorb(&src);
             }
             i = 0;
@@ -194,21 +198,19 @@ fn Aegis128LGeneric(comptime tag_bits: u9) type {
                 state.dec(m[i..][0..32], c[i..][0..32]);
             }
             if (m.len % 32 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. m.len % 32], c[i .. i + m.len % 32]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. m.len % 32], c[i..][0 .. m.len % 32]);
                 state.dec(&dst, &src);
-                mem.copy(u8, m[i .. i + m.len % 32], dst[0 .. m.len % 32]);
-                mem.set(u8, dst[0 .. m.len % 32], 0);
+                @memcpy(m[i..][0 .. m.len % 32], dst[0 .. m.len % 32]);
+                @memset(dst[0 .. m.len % 32], 0);
                 const blocks = &state.blocks;
                 blocks[0] = blocks[0].xorBlocks(AesBlock.fromBytes(dst[0..16]));
                 blocks[4] = blocks[4].xorBlocks(AesBlock.fromBytes(dst[16..32]));
             }
-            const computed_tag = state.mac(tag_bits, ad.len, m.len);
-            var acc: u8 = 0;
-            for (computed_tag, 0..) |_, j| {
-                acc |= (computed_tag[j] ^ tag[j]);
-            }
-            if (acc != 0) {
+            var computed_tag = state.mac(tag_bits, ad.len, m.len);
+            const verify = crypto.utils.timingSafeEql([tag_length]u8, computed_tag, tag);
+            if (!verify) {
+                crypto.utils.secureZero(u8, &computed_tag);
                 @memset(m, undefined);
                 return error.AuthenticationFailed;
             }
@@ -282,8 +284,8 @@ const State256 = struct {
     fn mac(state: *State256, comptime tag_bits: u9, adlen: usize, mlen: usize) [tag_bits / 8]u8 {
         const blocks = &state.blocks;
         var sizes: [16]u8 = undefined;
-        mem.writeIntLittle(u64, sizes[0..8], adlen * 8);
-        mem.writeIntLittle(u64, sizes[8..16], mlen * 8);
+        mem.writeInt(u64, sizes[0..8], adlen * 8, .little);
+        mem.writeInt(u64, sizes[8..16], mlen * 8, .little);
         const tmp = AesBlock.fromBytes(&sizes).xorBlocks(blocks[3]);
         var i: usize = 0;
         while (i < 7) : (i += 1) {
@@ -334,8 +336,8 @@ fn Aegis256Generic(comptime tag_bits: u9) type {
                 state.enc(&dst, ad[i..][0..16]);
             }
             if (ad.len % 16 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. ad.len % 16], ad[i .. i + ad.len % 16]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. ad.len % 16], ad[i..][0 .. ad.len % 16]);
                 state.enc(&dst, &src);
             }
             i = 0;
@@ -343,20 +345,23 @@ fn Aegis256Generic(comptime tag_bits: u9) type {
                 state.enc(c[i..][0..16], m[i..][0..16]);
             }
             if (m.len % 16 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. m.len % 16], m[i .. i + m.len % 16]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. m.len % 16], m[i..][0 .. m.len % 16]);
                 state.enc(&dst, &src);
-                mem.copy(u8, c[i .. i + m.len % 16], dst[0 .. m.len % 16]);
+                @memcpy(c[i..][0 .. m.len % 16], dst[0 .. m.len % 16]);
             }
             tag.* = state.mac(tag_bits, ad.len, m.len);
         }
 
-        /// m: message: output buffer should be of size c.len
-        /// c: ciphertext
-        /// tag: authentication tag
-        /// ad: Associated Data
-        /// npub: public nonce
-        /// k: private key
+        /// `m`: Message
+        /// `c`: Ciphertext
+        /// `tag`: Authentication tag
+        /// `ad`: Associated data
+        /// `npub`: Public nonce
+        /// `k`: Private key
+        /// Asserts `c.len == m.len`.
+        ///
+        /// Contents of `m` are undefined if an error is returned.
         pub fn decrypt(m: []u8, c: []const u8, tag: [tag_length]u8, ad: []const u8, npub: [nonce_length]u8, key: [key_length]u8) AuthenticationError!void {
             assert(c.len == m.len);
             var state = State256.init(key, npub);
@@ -367,8 +372,8 @@ fn Aegis256Generic(comptime tag_bits: u9) type {
                 state.enc(&dst, ad[i..][0..16]);
             }
             if (ad.len % 16 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. ad.len % 16], ad[i .. i + ad.len % 16]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. ad.len % 16], ad[i..][0 .. ad.len % 16]);
                 state.enc(&dst, &src);
             }
             i = 0;
@@ -376,20 +381,18 @@ fn Aegis256Generic(comptime tag_bits: u9) type {
                 state.dec(m[i..][0..16], c[i..][0..16]);
             }
             if (m.len % 16 != 0) {
-                mem.set(u8, src[0..], 0);
-                mem.copy(u8, src[0 .. m.len % 16], c[i .. i + m.len % 16]);
+                @memset(src[0..], 0);
+                @memcpy(src[0 .. m.len % 16], c[i..][0 .. m.len % 16]);
                 state.dec(&dst, &src);
-                mem.copy(u8, m[i .. i + m.len % 16], dst[0 .. m.len % 16]);
-                mem.set(u8, dst[0 .. m.len % 16], 0);
+                @memcpy(m[i..][0 .. m.len % 16], dst[0 .. m.len % 16]);
+                @memset(dst[0 .. m.len % 16], 0);
                 const blocks = &state.blocks;
                 blocks[0] = blocks[0].xorBlocks(AesBlock.fromBytes(&dst));
             }
-            const computed_tag = state.mac(tag_bits, ad.len, m.len);
-            var acc: u8 = 0;
-            for (computed_tag, 0..) |_, j| {
-                acc |= (computed_tag[j] ^ tag[j]);
-            }
-            if (acc != 0) {
+            var computed_tag = state.mac(tag_bits, ad.len, m.len);
+            const verify = crypto.utils.timingSafeEql([tag_length]u8, computed_tag, tag);
+            if (!verify) {
+                crypto.utils.secureZero(u8, &computed_tag);
                 @memset(m, undefined);
                 return error.AuthenticationFailed;
             }
@@ -411,7 +414,7 @@ pub const Aegis128LMac = AegisMac(Aegis128L_256);
 /// concern, the AEGIS-128L variant should be preferred.
 /// AEGIS' large state, non-linearity and non-invertibility provides the
 /// following properties:
-/// - 256 bit security against forgery.
+/// - More than 128 bit security against forgery.
 /// - Recovering the secret key from the state would require ~2^256 attempts,
 ///   which is infeasible for any practical adversary.
 /// - It has a large security margin against internal collisions.
@@ -457,7 +460,7 @@ fn AegisMac(comptime T: type) type {
             self.msg_len += b.len;
 
             const len_partial = @min(b.len, block_length - self.off);
-            mem.copy(u8, self.buf[self.off..][0..len_partial], b[0..len_partial]);
+            @memcpy(self.buf[self.off..][0..len_partial], b[0..len_partial]);
             self.off += len_partial;
             if (self.off < block_length) {
                 return;
@@ -470,8 +473,8 @@ fn AegisMac(comptime T: type) type {
                 self.state.absorb(b[i..][0..block_length]);
             }
             if (i != b.len) {
-                mem.copy(u8, self.buf[0..], b[i..]);
                 self.off = b.len - i;
+                @memcpy(self.buf[0..self.off], b[i..]);
             }
         }
 
@@ -479,7 +482,7 @@ fn AegisMac(comptime T: type) type {
         pub fn final(self: *Self, out: *[mac_length]u8) void {
             if (self.off > 0) {
                 var pad = [_]u8{0} ** block_length;
-                mem.copy(u8, pad[0..], self.buf[0..self.off]);
+                @memcpy(pad[0..self.off], self.buf[0..self.off]);
                 self.state.absorb(&pad);
             }
             out.* = self.state.mac(T.tag_length * 8, self.msg_len, 0);
@@ -625,7 +628,7 @@ test "Aegis MAC" {
     const key = [_]u8{0x00} ** Aegis128LMac.key_length;
     var msg: [64]u8 = undefined;
     for (&msg, 0..) |*m, i| {
-        m.* = @truncate(u8, i);
+        m.* = @as(u8, @truncate(i));
     }
     const st_init = Aegis128LMac.init(&key);
     var st = st_init;
@@ -653,4 +656,10 @@ test "Aegis MAC" {
     const nonce = [_]u8{0x00} ** Aegis128L_256.nonce_length;
     Aegis128L_256.encrypt(&empty, &tag, &empty, &msg, nonce, key);
     try htest.assertEqual("f8840849602738d81037cbaa0f584ea95759e2ac60263ce77346bcdc79fe4319", &tag);
+
+    // An update whose size is not a multiple of the block size
+    st = st_init;
+    st.update(msg[0..33]);
+    st.final(&tag);
+    try htest.assertEqual("c7cf649a844c1a6676cf6d91b1658e0aee54a4da330b0a8d3bc7ea4067551d1b", &tag);
 }

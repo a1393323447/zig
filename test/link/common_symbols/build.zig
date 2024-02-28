@@ -14,9 +14,12 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     const lib_a = b.addStaticLibrary(.{
         .name = "a",
         .optimize = optimize,
-        .target = .{},
+        .target = b.host,
     });
-    lib_a.addCSourceFiles(&.{ "c.c", "a.c", "b.c" }, &.{"-fcommon"});
+    lib_a.addCSourceFiles(.{
+        .files = &.{ "c.c", "a.c", "b.c" },
+        .flags = &.{"-fcommon"},
+    });
 
     const test_exe = b.addTest(.{
         .root_source_file = .{ .path = "main.zig" },

@@ -51,13 +51,13 @@ pub fn Field(comptime params: FieldParams) type {
 
         /// Reject non-canonical encodings of an element.
         pub fn rejectNonCanonical(s_: [encoded_length]u8, endian: std.builtin.Endian) NonCanonicalError!void {
-            var s = if (endian == .Little) s_ else orderSwap(s_);
+            var s = if (endian == .little) s_ else orderSwap(s_);
             const field_order_s = comptime fos: {
                 var fos: [encoded_length]u8 = undefined;
-                mem.writeIntLittle(std.meta.Int(.unsigned, encoded_length * 8), &fos, field_order);
+                mem.writeInt(std.meta.Int(.unsigned, encoded_length * 8), &fos, field_order, .little);
                 break :fos fos;
             };
-            if (crypto.utils.timingSafeCompare(u8, &s, &field_order_s, .Little) != .lt) {
+            if (crypto.utils.timingSafeCompare(u8, &s, &field_order_s, .little) != .lt) {
                 return error.NonCanonical;
             }
         }
@@ -71,8 +71,8 @@ pub fn Field(comptime params: FieldParams) type {
 
         /// Unpack a field element.
         pub fn fromBytes(s_: [encoded_length]u8, endian: std.builtin.Endian) NonCanonicalError!Fe {
-            var s = if (endian == .Little) s_ else orderSwap(s_);
-            try rejectNonCanonical(s, .Little);
+            const s = if (endian == .little) s_ else orderSwap(s_);
+            try rejectNonCanonical(s, .little);
             var limbs_z: NonMontgomeryDomainFieldElement = undefined;
             fiat.fromBytes(&limbs_z, s);
             var limbs: MontgomeryDomainFieldElement = undefined;
@@ -86,7 +86,7 @@ pub fn Field(comptime params: FieldParams) type {
             fiat.fromMontgomery(&limbs_z, fe.limbs);
             var s: [encoded_length]u8 = undefined;
             fiat.toBytes(&s, limbs_z);
-            return if (endian == .Little) s else orderSwap(s);
+            return if (endian == .little) s else orderSwap(s);
         }
 
         /// Element as an integer.
@@ -95,14 +95,14 @@ pub fn Field(comptime params: FieldParams) type {
         /// Create a field element from an integer.
         pub fn fromInt(comptime x: IntRepr) NonCanonicalError!Fe {
             var s: [encoded_length]u8 = undefined;
-            mem.writeIntLittle(IntRepr, &s, x);
-            return fromBytes(s, .Little);
+            mem.writeInt(IntRepr, &s, x, .little);
+            return fromBytes(s, .little);
         }
 
         /// Return the field element as an integer.
         pub fn toInt(fe: Fe) IntRepr {
-            const s = fe.toBytes(.Little);
-            return mem.readIntLittle(IntRepr, &s);
+            const s = fe.toBytes(.little);
+            return mem.readInt(IntRepr, &s, .little);
         }
 
         /// Return true if the field element is zero.
@@ -119,8 +119,8 @@ pub fn Field(comptime params: FieldParams) type {
 
         /// Return true if the element is odd.
         pub fn isOdd(fe: Fe) bool {
-            const s = fe.toBytes(.Little);
-            return @truncate(u1, s[0]) != 0;
+            const s = fe.toBytes(.little);
+            return @as(u1, @truncate(s[0])) != 0;
         }
 
         /// Conditonally replace a field element with `a` if `c` is positive.
@@ -179,7 +179,7 @@ pub fn Field(comptime params: FieldParams) type {
             var x: T = n;
             var t = a;
             while (true) {
-                if (@truncate(u1, x) != 0) fe = fe.mul(t);
+                if (@as(u1, @truncate(x)) != 0) fe = fe.mul(t);
                 x >>= 1;
                 if (x == 0) break;
                 t = t.sq();
@@ -228,12 +228,12 @@ pub fn Field(comptime params: FieldParams) type {
             }
             if (iterations % 2 != 0) {
                 fiat.divstep(&out1, &out2, &out3, &out4, &out5, d, f, g, v, r);
-                mem.copy(Word, &v, &out4);
-                mem.copy(Word, &f, &out2);
+                v = out4;
+                f = out2;
             }
             var v_opp: Limbs = undefined;
             fiat.opp(&v_opp, v);
-            fiat.selectznz(&v, @truncate(u1, f[f.len - 1] >> (@bitSizeOf(Word) - 1)), v, v_opp);
+            fiat.selectznz(&v, @as(u1, @truncate(f[f.len - 1] >> (@bitSizeOf(Word) - 1))), v, v_opp);
 
             const precomp = blk: {
                 var precomp: Limbs = undefined;

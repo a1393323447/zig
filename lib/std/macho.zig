@@ -356,7 +356,7 @@ pub const dysymtab_command = extern struct {
 
     // All the local relocation entries are grouped together (they are not
     // grouped by their module since they are only used if the object is moved
-    // from it staticly link edited address).
+    // from its statically link edited address).
 
     /// offset to local relocation entries
     locreloff: u32 = 0,
@@ -418,7 +418,7 @@ pub const dyld_info_command = extern struct {
     //    <seg-index, seg-offset, type, symbol-library-ordinal, symbol-name, addend>
     // The opcodes are a compressed way to encode the table by only
     // encoding when a column changes.  In addition simple patterns
-    // like for runs of pointers initialzed to the same value can be
+    // like for runs of pointers initialized to the same value can be
     // encoded in a few bytes.
 
     /// file offset to binding info
@@ -787,7 +787,7 @@ pub const section_64 = extern struct {
     }
 
     pub fn @"type"(sect: section_64) u8 {
-        return @truncate(u8, sect.flags & 0xff);
+        return @as(u8, @truncate(sect.flags & 0xff));
     }
 
     pub fn attrs(sect: section_64) u32 {
@@ -843,15 +843,15 @@ pub const nlist_64 = extern struct {
     n_value: u64,
 
     pub fn stab(sym: nlist_64) bool {
-        return (N_STAB & sym.n_type) != 0;
+        return N_STAB & sym.n_type != 0;
     }
 
     pub fn pext(sym: nlist_64) bool {
-        return (N_PEXT & sym.n_type) != 0;
+        return N_PEXT & sym.n_type != 0;
     }
 
     pub fn ext(sym: nlist_64) bool {
-        return (N_EXT & sym.n_type) != 0;
+        return N_EXT & sym.n_type != 0;
     }
 
     pub fn sect(sym: nlist_64) bool {
@@ -875,15 +875,19 @@ pub const nlist_64 = extern struct {
     }
 
     pub fn weakDef(sym: nlist_64) bool {
-        return (sym.n_desc & N_WEAK_DEF) != 0;
+        return sym.n_desc & N_WEAK_DEF != 0;
     }
 
     pub fn weakRef(sym: nlist_64) bool {
-        return (sym.n_desc & N_WEAK_REF) != 0;
+        return sym.n_desc & N_WEAK_REF != 0;
     }
 
     pub fn discarded(sym: nlist_64) bool {
-        return (sym.n_desc & N_DESC_DISCARDED) != 0;
+        return sym.n_desc & N_DESC_DISCARDED != 0;
+    }
+
+    pub fn noDeadStrip(sym: nlist_64) bool {
+        return sym.n_desc & N_NO_DEAD_STRIP != 0;
     }
 
     pub fn tentative(sym: nlist_64) bool {
@@ -1002,7 +1006,7 @@ pub const LC = enum(u32) {
 
     /// load a dynamically linked shared library that is allowed to be missing
     /// (all symbols are weak imported).
-    LOAD_WEAK_DYLIB = (0x18 | LC_REQ_DYLD),
+    LOAD_WEAK_DYLIB = 0x18 | LC_REQ_DYLD,
 
     /// 64-bit segment of this file to be mapped
     SEGMENT_64 = 0x19,
@@ -1014,7 +1018,7 @@ pub const LC = enum(u32) {
     UUID = 0x1b,
 
     /// runpath additions
-    RPATH = (0x1c | LC_REQ_DYLD),
+    RPATH = 0x1c | LC_REQ_DYLD,
 
     /// local of code signature
     CODE_SIGNATURE = 0x1d,
@@ -1023,7 +1027,7 @@ pub const LC = enum(u32) {
     SEGMENT_SPLIT_INFO = 0x1e,
 
     /// load and re-export dylib
-    REEXPORT_DYLIB = (0x1f | LC_REQ_DYLD),
+    REEXPORT_DYLIB = 0x1f | LC_REQ_DYLD,
 
     /// delay load of dylib until first use
     LAZY_LOAD_DYLIB = 0x20,
@@ -1035,10 +1039,10 @@ pub const LC = enum(u32) {
     DYLD_INFO = 0x22,
 
     /// compressed dyld information only
-    DYLD_INFO_ONLY = (0x22 | LC_REQ_DYLD),
+    DYLD_INFO_ONLY = 0x22 | LC_REQ_DYLD,
 
     /// load upward dylib
-    LOAD_UPWARD_DYLIB = (0x23 | LC_REQ_DYLD),
+    LOAD_UPWARD_DYLIB = 0x23 | LC_REQ_DYLD,
 
     /// build for MacOSX min OS version
     VERSION_MIN_MACOSX = 0x24,
@@ -1053,7 +1057,7 @@ pub const LC = enum(u32) {
     DYLD_ENVIRONMENT = 0x27,
 
     /// replacement for LC_UNIXTHREAD
-    MAIN = (0x28 | LC_REQ_DYLD),
+    MAIN = 0x28 | LC_REQ_DYLD,
 
     /// table of non-instructions in __text
     DATA_IN_CODE = 0x29,
@@ -1084,6 +1088,12 @@ pub const LC = enum(u32) {
 
     /// build for platform min OS version
     BUILD_VERSION = 0x32,
+
+    /// used with linkedit_data_command, payload is trie
+    DYLD_EXPORTS_TRIE = 0x33 | LC_REQ_DYLD,
+
+    /// used with linkedit_data_command
+    DYLD_CHAINED_FIXUPS = 0x34 | LC_REQ_DYLD,
 
     _,
 };
@@ -1141,7 +1151,7 @@ pub const MH_NOUNDEFS = 0x1;
 /// the object file is the output of an incremental link against a base file and can't be link edited again
 pub const MH_INCRLINK = 0x2;
 
-/// the object file is input for the dynamic linker and can't be staticly link edited again
+/// the object file is input for the dynamic linker and can't be statically link edited again
 pub const MH_DYLDLINK = 0x4;
 
 /// the object file's undefined references are bound by the dynamic linker when loaded.
@@ -1162,7 +1172,7 @@ pub const MH_TWOLEVEL = 0x80;
 /// the executable is forcing all images to use flat name space bindings
 pub const MH_FORCE_FLAT = 0x100;
 
-/// this umbrella guarantees no multiple defintions of symbols in its sub-images so the two-level namespace hints can always be used.
+/// this umbrella guarantees no multiple definitions of symbols in its sub-images so the two-level namespace hints can always be used.
 pub const MH_NOMULTIDEFS = 0x200;
 
 /// do not have dyld notify the prebinding agent about this executable
@@ -1229,6 +1239,22 @@ pub const FAT_MAGIC_64 = 0xcafebabf;
 
 /// NXSwapLong(FAT_MAGIC_64)
 pub const FAT_CIGAM_64 = 0xbfbafeca;
+
+/// Segment flags
+/// The file contents for this segment is for the high part of the VM space, the low part
+/// is zero filled (for stacks in core files).
+pub const SG_HIGHVM = 0x1;
+/// This segment is the VM that is allocated by a fixed VM library, for overlap checking in
+/// the link editor.
+pub const SG_FVMLIB = 0x2;
+/// This segment has nothing that was relocated in it and nothing relocated to it, that is
+/// it maybe safely replaced without relocation.
+pub const SG_NORELOC = 0x4;
+/// This segment is protected.  If the segment starts at file offset 0, the
+/// first page of the segment is not protected.  All other pages of the segment are protected.
+pub const SG_PROTECTED_VERSION_1 = 0x8;
+/// This segment is made read-only after fixups
+pub const SG_READ_ONLY = 0x10;
 
 /// The flags field of a section structure is separated into two parts a section
 /// type and section attributes.  The section types are mutually exclusive (it
@@ -1629,6 +1655,11 @@ pub const REFERENCE_FLAG_PRIVATE_UNDEFINED_LAZY: u16 = 5;
 /// to avoid removing symbols that must exist: If the symbol has this bit set, strip does not strip it.
 pub const REFERENCED_DYNAMICALLY: u16 = 0x10;
 
+/// The N_NO_DEAD_STRIP bit of the n_desc field only ever appears in a
+/// relocatable .o file (MH_OBJECT filetype). And is used to indicate to the
+/// static link editor it is never to dead strip the symbol.
+pub const N_NO_DEAD_STRIP: u16 = 0x20;
+
 /// Used by the dynamic linker at runtime. Do not set this bit.
 pub const N_DESC_DISCARDED: u16 = 0x20;
 
@@ -1653,12 +1684,12 @@ pub const EXPORT_SYMBOL_FLAGS_KIND_MASK: u8 = 0x03;
 pub const EXPORT_SYMBOL_FLAGS_KIND_REGULAR: u8 = 0x00;
 pub const EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL: u8 = 0x01;
 pub const EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE: u8 = 0x02;
-pub const EXPORT_SYMBOL_FLAGS_KIND_WEAK_DEFINITION: u8 = 0x04;
+pub const EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION: u8 = 0x04;
 pub const EXPORT_SYMBOL_FLAGS_REEXPORT: u8 = 0x08;
 pub const EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER: u8 = 0x10;
 
 // An indirect symbol table entry is simply a 32bit index into the symbol table
-// to the symbol that the pointer or stub is refering to.  Unless it is for a
+// to the symbol that the pointer or stub is referring to.  Unless it is for a
 // non-lazy symbol pointer section for a defined symbol which strip(1) as
 // removed.  In which case it has the value INDIRECT_SYMBOL_LOCAL.  If the
 // symbol was also absolute INDIRECT_SYMBOL_ABS is or'ed with that.
@@ -1741,7 +1772,7 @@ pub const CS_LINKER_SIGNED: u32 = 0x20000;
 
 pub const CS_EXECSEG_MAIN_BINARY: u32 = 0x1;
 
-/// This CodeDirectory is tailored specfically at version 0x20400.
+/// This CodeDirectory is tailored specifically at version 0x20400.
 pub const CodeDirectory = extern struct {
     /// Magic number (CSMAGIC_CODEDIRECTORY)
     magic: u32,
@@ -1853,7 +1884,7 @@ pub const data_in_code_entry = extern struct {
 
 pub const LoadCommandIterator = struct {
     ncmds: usize,
-    buffer: []align(@alignOf(u64)) const u8,
+    buffer: []const u8,
     index: usize = 0,
 
     pub const LoadCommand = struct {
@@ -1870,18 +1901,15 @@ pub const LoadCommandIterator = struct {
 
         pub fn cast(lc: LoadCommand, comptime Cmd: type) ?Cmd {
             if (lc.data.len < @sizeOf(Cmd)) return null;
-            return @ptrCast(*const Cmd, @alignCast(@alignOf(Cmd), &lc.data[0])).*;
+            return @as(*align(1) const Cmd, @ptrCast(lc.data.ptr)).*;
         }
 
         /// Asserts LoadCommand is of type segment_command_64.
-        pub fn getSections(lc: LoadCommand) []const section_64 {
+        pub fn getSections(lc: LoadCommand) []align(1) const section_64 {
             const segment_lc = lc.cast(segment_command_64).?;
             if (segment_lc.nsects == 0) return &[0]section_64{};
             const data = lc.data[@sizeOf(segment_command_64)..];
-            const sections = @ptrCast(
-                [*]const section_64,
-                @alignCast(@alignOf(section_64), &data[0]),
-            )[0..segment_lc.nsects];
+            const sections = @as([*]align(1) const section_64, @ptrCast(data.ptr))[0..segment_lc.nsects];
             return sections;
         }
 
@@ -1898,21 +1926,28 @@ pub const LoadCommandIterator = struct {
             const data = lc.data[rpath_lc.path..];
             return mem.sliceTo(data, 0);
         }
+
+        /// Asserts LoadCommand is of type build_version_command.
+        pub fn getBuildVersionTools(lc: LoadCommand) []align(1) const build_tool_version {
+            const build_lc = lc.cast(build_version_command).?;
+            const ntools = build_lc.ntools;
+            if (ntools == 0) return &[0]build_tool_version{};
+            const data = lc.data[@sizeOf(build_version_command)..];
+            const tools = @as([*]align(1) const build_tool_version, @ptrCast(data.ptr))[0..ntools];
+            return tools;
+        }
     };
 
     pub fn next(it: *LoadCommandIterator) ?LoadCommand {
         if (it.index >= it.ncmds) return null;
 
-        const hdr = @ptrCast(
-            *const load_command,
-            @alignCast(@alignOf(load_command), &it.buffer[0]),
-        ).*;
+        const hdr = @as(*align(1) const load_command, @ptrCast(it.buffer.ptr)).*;
         const cmd = LoadCommand{
             .hdr = hdr,
             .data = it.buffer[0..hdr.cmdsize],
         };
 
-        it.buffer = @alignCast(@alignOf(u64), it.buffer[hdr.cmdsize..]);
+        it.buffer = it.buffer[hdr.cmdsize..];
         it.index += 1;
 
         return cmd;
@@ -2064,3 +2099,64 @@ pub const UNWIND_ARM64_FRAME_D14_D15_PAIR: u32 = 0x00000800;
 
 pub const UNWIND_ARM64_FRAMELESS_STACK_SIZE_MASK: u32 = 0x00FFF000;
 pub const UNWIND_ARM64_DWARF_SECTION_OFFSET: u32 = 0x00FFFFFF;
+
+pub const CompactUnwindEncoding = packed struct(u32) {
+    value: packed union {
+        x86_64: packed union {
+            frame: packed struct(u24) {
+                reg4: u3,
+                reg3: u3,
+                reg2: u3,
+                reg1: u3,
+                reg0: u3,
+                unused: u1 = 0,
+                frame_offset: u8,
+            },
+            frameless: packed struct(u24) {
+                stack_reg_permutation: u10,
+                stack_reg_count: u3,
+                stack: packed union {
+                    direct: packed struct(u11) {
+                        _: u3,
+                        stack_size: u8,
+                    },
+                    indirect: packed struct(u11) {
+                        stack_adjust: u3,
+                        sub_offset: u8,
+                    },
+                },
+            },
+            dwarf: u24,
+        },
+        arm64: packed union {
+            frame: packed struct(u24) {
+                x_reg_pairs: packed struct(u5) {
+                    x19_x20: u1,
+                    x21_x22: u1,
+                    x23_x24: u1,
+                    x25_x26: u1,
+                    x27_x28: u1,
+                },
+                d_reg_pairs: packed struct(u4) {
+                    d8_d9: u1,
+                    d10_d11: u1,
+                    d12_d13: u1,
+                    d14_d15: u1,
+                },
+                _: u15,
+            },
+            frameless: packed struct(u24) {
+                _: u12 = 0,
+                stack_size: u12,
+            },
+            dwarf: u24,
+        },
+    },
+    mode: packed union {
+        x86_64: UNWIND_X86_64_MODE,
+        arm64: UNWIND_ARM64_MODE,
+    },
+    personality_index: u2,
+    has_lsda: u1,
+    start: u1,
+};

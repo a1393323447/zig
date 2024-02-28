@@ -5,14 +5,16 @@
 //! Some instructions are special, such as:
 //! * Conditional Branches
 //! * Switch Branches
-const Liveness = @This();
 const std = @import("std");
-const trace = @import("tracy.zig").trace;
 const log = std.log.scoped(.liveness);
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const Air = @import("Air.zig");
 const Log2Int = std.math.Log2Int;
+
+const Liveness = @This();
+const trace = @import("tracy.zig").trace;
+const Air = @import("Air.zig");
+const InternPool = @import("InternPool.zig");
 
 pub const Verify = @import("Liveness/Verify.zig");
 
@@ -103,16 +105,8 @@ fn LivenessPassData(comptime pass: LivenessPass) type {
             /// Every `block` currently under analysis.
             block_scopes: std.AutoHashMapUnmanaged(Air.Inst.Index, BlockScope) = .{},
 
-            /// The set of deaths which should be made to occur at the earliest possible point in
-            /// this control flow branch. These instructions die when they are last referenced in
-            /// the current branch; if unreferenced, they die at the start of the branch. Populated
-            /// when a `br` instruction is reached. If deaths are common to all branches of control
-            /// flow, they may be bubbled up to the parent branch.
-            branch_deaths: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .{},
-
-            /// The set of instructions currently alive. Instructions which must die in this branch
-            /// (i.e. those in `branch_deaths`) are not in this set, because they must die before
-            /// this point.
+            /// The set of instructions currently alive in the current control
+            /// flow branch.
             live_set: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .{},
 
             /// The extra data initialized by the `loop_analysis` pass for this pass to consume.
@@ -130,7 +124,6 @@ fn LivenessPassData(comptime pass: LivenessPass) type {
                     block.live_set.deinit(gpa);
                 }
                 self.block_scopes.deinit(gpa);
-                self.branch_deaths.deinit(gpa);
                 self.live_set.deinit(gpa);
                 self.old_extra.deinit(gpa);
             }
@@ -138,7 +131,7 @@ fn LivenessPassData(comptime pass: LivenessPass) type {
     };
 }
 
-pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
+pub fn analyze(gpa: Allocator, air: Air, intern_pool: *const InternPool) Allocator.Error!Liveness {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -151,12 +144,13 @@ pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
         ),
         .extra = .{},
         .special = .{},
+        .intern_pool = intern_pool,
     };
     errdefer gpa.free(a.tomb_bits);
     errdefer a.special.deinit(gpa);
     defer a.extra.deinit(gpa);
 
-    std.mem.set(usize, a.tomb_bits, 0);
+    @memset(a.tomb_bits, 0);
 
     const main_body = air.getMainBody();
 
@@ -172,7 +166,7 @@ pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
         data.old_extra = a.extra;
         a.extra = .{};
         try analyzeBody(&a, .main_analysis, &data, main_body);
-        assert(data.branch_deaths.count() == 0);
+        assert(data.live_set.count() == 0);
     }
 
     return .{
@@ -183,31 +177,31 @@ pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
 }
 
 pub fn getTombBits(l: Liveness, inst: Air.Inst.Index) Bpi {
-    const usize_index = (inst * bpi) / @bitSizeOf(usize);
-    return @truncate(Bpi, l.tomb_bits[usize_index] >>
-        @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi));
+    const usize_index = (@intFromEnum(inst) * bpi) / @bitSizeOf(usize);
+    return @as(Bpi, @truncate(l.tomb_bits[usize_index] >>
+        @as(Log2Int(usize), @intCast((@intFromEnum(inst) % (@bitSizeOf(usize) / bpi)) * bpi))));
 }
 
 pub fn isUnused(l: Liveness, inst: Air.Inst.Index) bool {
-    const usize_index = (inst * bpi) / @bitSizeOf(usize);
+    const usize_index = (@intFromEnum(inst) * bpi) / @bitSizeOf(usize);
     const mask = @as(usize, 1) <<
-        @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi + (bpi - 1));
+        @as(Log2Int(usize), @intCast((@intFromEnum(inst) % (@bitSizeOf(usize) / bpi)) * bpi + (bpi - 1)));
     return (l.tomb_bits[usize_index] & mask) != 0;
 }
 
 pub fn operandDies(l: Liveness, inst: Air.Inst.Index, operand: OperandInt) bool {
     assert(operand < bpi - 1);
-    const usize_index = (inst * bpi) / @bitSizeOf(usize);
+    const usize_index = (@intFromEnum(inst) * bpi) / @bitSizeOf(usize);
     const mask = @as(usize, 1) <<
-        @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi + operand);
+        @as(Log2Int(usize), @intCast((@intFromEnum(inst) % (@bitSizeOf(usize) / bpi)) * bpi + operand));
     return (l.tomb_bits[usize_index] & mask) != 0;
 }
 
 pub fn clearOperandDeath(l: Liveness, inst: Air.Inst.Index, operand: OperandInt) void {
     assert(operand < bpi - 1);
-    const usize_index = (inst * bpi) / @bitSizeOf(usize);
+    const usize_index = (@intFromEnum(inst) * bpi) / @bitSizeOf(usize);
     const mask = @as(usize, 1) <<
-        @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi + operand);
+        @as(Log2Int(usize), @intCast((@intFromEnum(inst) % (@bitSizeOf(usize) / bpi)) * bpi + operand));
     l.tomb_bits[usize_index] &= ~mask;
 }
 
@@ -231,20 +225,27 @@ pub fn categorizeOperand(
     air: Air,
     inst: Air.Inst.Index,
     operand: Air.Inst.Index,
+    ip: *const InternPool,
 ) OperandCategory {
     const air_tags = air.instructions.items(.tag);
     const air_datas = air.instructions.items(.data);
-    const operand_ref = Air.indexToRef(operand);
-    switch (air_tags[inst]) {
+    const operand_ref = operand.toRef();
+    switch (air_tags[@intFromEnum(inst)]) {
         .add,
-        .addwrap,
+        .add_safe,
+        .add_wrap,
         .add_sat,
+        .add_optimized,
         .sub,
-        .subwrap,
+        .sub_safe,
+        .sub_wrap,
         .sub_sat,
+        .sub_optimized,
         .mul,
-        .mulwrap,
+        .mul_safe,
+        .mul_wrap,
         .mul_sat,
+        .mul_optimized,
         .div_float,
         .div_trunc,
         .div_floor,
@@ -272,12 +273,6 @@ pub fn categorizeOperand(
         .shr_exact,
         .min,
         .max,
-        .add_optimized,
-        .addwrap_optimized,
-        .sub_optimized,
-        .subwrap_optimized,
-        .mul_optimized,
-        .mulwrap_optimized,
         .div_float_optimized,
         .div_trunc_optimized,
         .div_floor_optimized,
@@ -292,7 +287,7 @@ pub fn categorizeOperand(
         .cmp_gt_optimized,
         .cmp_neq_optimized,
         => {
-            const o = air_datas[inst].bin_op;
+            const o = air_datas[@intFromEnum(inst)].bin_op;
             if (o.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (o.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
             return .none;
@@ -309,14 +304,14 @@ pub fn categorizeOperand(
         .memset_safe,
         .memcpy,
         => {
-            const o = air_datas[inst].bin_op;
+            const o = air_datas[@intFromEnum(inst)].bin_op;
             if (o.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             if (o.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .write);
             return .write;
         },
 
         .vector_store_elem => {
-            const o = air_datas[inst].vector_store_elem;
+            const o = air_datas[@intFromEnum(inst)].vector_store_elem;
             const extra = air.extraData(Air.Bin, o.payload).data;
             if (o.vector_ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
@@ -326,16 +321,14 @@ pub fn categorizeOperand(
 
         .arg,
         .alloc,
+        .inferred_alloc,
+        .inferred_alloc_comptime,
         .ret_ptr,
-        .constant,
-        .const_ty,
         .trap,
         .breakpoint,
         .dbg_stmt,
         .dbg_inline_begin,
         .dbg_inline_end,
-        .dbg_block_begin,
-        .dbg_block_end,
         .unreach,
         .ret_addr,
         .frame_addr,
@@ -375,9 +368,9 @@ pub fn categorizeOperand(
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
         .array_to_slice,
-        .float_to_int,
-        .float_to_int_optimized,
-        .int_to_float,
+        .int_from_float,
+        .int_from_float_optimized,
+        .float_from_int,
         .get_union_tag,
         .clz,
         .ctz,
@@ -389,8 +382,9 @@ pub fn categorizeOperand(
         .addrspace_cast,
         .c_va_arg,
         .c_va_copy,
+        .abs,
         => {
-            const o = air_datas[inst].ty_op;
+            const o = air_datas[@intFromEnum(inst)].ty_op;
             if (o.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
@@ -398,7 +392,7 @@ pub fn categorizeOperand(
         .optional_payload_ptr_set,
         .errunion_payload_ptr_set,
         => {
-            const o = air_datas[inst].ty_op;
+            const o = air_datas[@intFromEnum(inst)].ty_op;
             if (o.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             return .write;
         },
@@ -411,8 +405,8 @@ pub fn categorizeOperand(
         .is_non_err,
         .is_err_ptr,
         .is_non_err_ptr,
-        .ptrtoint,
-        .bool_to_int,
+        .int_from_ptr,
+        .int_from_bool,
         .is_named_enum_value,
         .tag_name,
         .error_name,
@@ -425,7 +419,6 @@ pub fn categorizeOperand(
         .log,
         .log2,
         .log10,
-        .fabs,
         .floor,
         .ceil,
         .round,
@@ -434,21 +427,22 @@ pub fn categorizeOperand(
         .cmp_lt_errors_len,
         .c_va_end,
         => {
-            const o = air_datas[inst].un_op;
+            const o = air_datas[@intFromEnum(inst)].un_op;
             if (o == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
 
         .ret,
+        .ret_safe,
         .ret_load,
         => {
-            const o = air_datas[inst].un_op;
+            const o = air_datas[@intFromEnum(inst)].un_op;
             if (o == operand_ref) return matchOperandSmallIndex(l, inst, 0, .noret);
             return .noret;
         },
 
         .set_err_return_trace => {
-            const o = air_datas[inst].un_op;
+            const o = air_datas[@intFromEnum(inst)].un_op;
             if (o == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             return .write;
         },
@@ -463,7 +457,7 @@ pub fn categorizeOperand(
         .slice_elem_ptr,
         .slice,
         => {
-            const ty_pl = air_datas[inst].ty_pl;
+            const ty_pl = air_datas[@intFromEnum(inst)].ty_pl;
             const extra = air.extraData(Air.Bin, ty_pl.payload).data;
             if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (extra.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
@@ -473,26 +467,26 @@ pub fn categorizeOperand(
         .dbg_var_ptr,
         .dbg_var_val,
         => {
-            const o = air_datas[inst].pl_op.operand;
+            const o = air_datas[@intFromEnum(inst)].pl_op.operand;
             if (o == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
 
         .prefetch => {
-            const prefetch = air_datas[inst].prefetch;
+            const prefetch = air_datas[@intFromEnum(inst)].prefetch;
             if (prefetch.ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
 
         .call, .call_always_tail, .call_never_tail, .call_never_inline => {
-            const inst_data = air_datas[inst].pl_op;
+            const inst_data = air_datas[@intFromEnum(inst)].pl_op;
             const callee = inst_data.operand;
             const extra = air.extraData(Air.Call, inst_data.payload);
-            const args = @ptrCast([]const Air.Inst.Ref, air.extra[extra.end..][0..extra.data.args_len]);
+            const args = @as([]const Air.Inst.Ref, @ptrCast(air.extra[extra.end..][0..extra.data.args_len]));
             if (args.len + 1 <= bpi - 1) {
                 if (callee == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
                 for (args, 0..) |arg, i| {
-                    if (arg == operand_ref) return matchOperandSmallIndex(l, inst, @intCast(OperandInt, i + 1), .write);
+                    if (arg == operand_ref) return matchOperandSmallIndex(l, inst, @as(OperandInt, @intCast(i + 1)), .write);
                 }
                 return .write;
             }
@@ -512,7 +506,7 @@ pub fn categorizeOperand(
             return .write;
         },
         .select => {
-            const pl_op = air_datas[inst].pl_op;
+            const pl_op = air_datas[@intFromEnum(inst)].pl_op;
             const extra = air.extraData(Air.Bin, pl_op.payload).data;
             if (pl_op.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
@@ -520,31 +514,31 @@ pub fn categorizeOperand(
             return .none;
         },
         .shuffle => {
-            const extra = air.extraData(Air.Shuffle, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.Shuffle, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.a == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (extra.b == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
             return .none;
         },
         .reduce, .reduce_optimized => {
-            const reduce = air_datas[inst].reduce;
+            const reduce = air_datas[@intFromEnum(inst)].reduce;
             if (reduce.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
         .cmp_vector, .cmp_vector_optimized => {
-            const extra = air.extraData(Air.VectorCmp, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.VectorCmp, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (extra.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
             return .none;
         },
         .aggregate_init => {
-            const ty_pl = air_datas[inst].ty_pl;
-            const aggregate_ty = air.getRefType(ty_pl.ty);
-            const len = @intCast(usize, aggregate_ty.arrayLen());
-            const elements = @ptrCast([]const Air.Inst.Ref, air.extra[ty_pl.payload..][0..len]);
+            const ty_pl = air_datas[@intFromEnum(inst)].ty_pl;
+            const aggregate_ty = ty_pl.ty.toType();
+            const len = @as(usize, @intCast(aggregate_ty.arrayLenIp(ip)));
+            const elements = @as([]const Air.Inst.Ref, @ptrCast(air.extra[ty_pl.payload..][0..len]));
 
             if (elements.len <= bpi - 1) {
                 for (elements, 0..) |elem, i| {
-                    if (elem == operand_ref) return matchOperandSmallIndex(l, inst, @intCast(OperandInt, i), .none);
+                    if (elem == operand_ref) return matchOperandSmallIndex(l, inst, @as(OperandInt, @intCast(i)), .none);
                 }
                 return .none;
             }
@@ -560,29 +554,29 @@ pub fn categorizeOperand(
             return .write;
         },
         .union_init => {
-            const extra = air.extraData(Air.UnionInit, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.UnionInit, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.init == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
         .struct_field_ptr, .struct_field_val => {
-            const extra = air.extraData(Air.StructField, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.StructField, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.struct_operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
         .field_parent_ptr => {
-            const extra = air.extraData(Air.FieldParentPtr, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.FieldParentPtr, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.field_ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
         .cmpxchg_strong, .cmpxchg_weak => {
-            const extra = air.extraData(Air.Cmpxchg, air_datas[inst].ty_pl.payload).data;
+            const extra = air.extraData(Air.Cmpxchg, air_datas[@intFromEnum(inst)].ty_pl.payload).data;
             if (extra.ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             if (extra.expected_value == operand_ref) return matchOperandSmallIndex(l, inst, 1, .write);
             if (extra.new_value == operand_ref) return matchOperandSmallIndex(l, inst, 2, .write);
             return .write;
         },
         .mul_add => {
-            const pl_op = air_datas[inst].pl_op;
+            const pl_op = air_datas[@intFromEnum(inst)].pl_op;
             const extra = air.extraData(Air.Bin, pl_op.payload).data;
             if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             if (extra.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
@@ -590,12 +584,12 @@ pub fn categorizeOperand(
             return .none;
         },
         .atomic_load => {
-            const ptr = air_datas[inst].atomic_load.ptr;
+            const ptr = air_datas[@intFromEnum(inst)].atomic_load.ptr;
             if (ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
         .atomic_rmw => {
-            const pl_op = air_datas[inst].pl_op;
+            const pl_op = air_datas[@intFromEnum(inst)].pl_op;
             const extra = air.extraData(Air.AtomicRmw, pl_op.payload).data;
             if (pl_op.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
             if (extra.operand == operand_ref) return matchOperandSmallIndex(l, inst, 1, .write);
@@ -603,39 +597,46 @@ pub fn categorizeOperand(
         },
 
         .br => {
-            const br = air_datas[inst].br;
-            if (br.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .noret);
+            const br = air_datas[@intFromEnum(inst)].br;
+            if (br.operand == operand_ref) return matchOperandSmallIndex(l, operand, 0, .noret);
             return .noret;
         },
         .assembly => {
             return .complex;
         },
         .block => {
-            const extra = air.extraData(Air.Block, air_datas[inst].ty_pl.payload);
-            const body = air.extra[extra.end..][0..extra.data.body_len];
+            const extra = air.extraData(Air.Block, air_datas[@intFromEnum(inst)].ty_pl.payload);
+            const body: []const Air.Inst.Index = @ptrCast(air.extra[extra.end..][0..extra.data.body_len]);
 
-            if (body.len == 1 and air_tags[body[0]] == .cond_br) {
+            if (body.len == 1 and air_tags[@intFromEnum(body[0])] == .cond_br) {
                 // Peephole optimization for "panic-like" conditionals, which have
                 // one empty branch and another which calls a `noreturn` function.
                 // This allows us to infer that safety checks do not modify memory,
                 // as far as control flow successors are concerned.
 
-                const inst_data = air_datas[body[0]].pl_op;
+                const inst_data = air_datas[@intFromEnum(body[0])].pl_op;
                 const cond_extra = air.extraData(Air.CondBr, inst_data.payload);
                 if (inst_data.operand == operand_ref and operandDies(l, body[0], 0))
                     return .tomb;
 
-                if (cond_extra.data.then_body_len != 1 or cond_extra.data.else_body_len != 1)
+                if (cond_extra.data.then_body_len > 2 or cond_extra.data.else_body_len > 2)
+                    return .complex;
+
+                const then_body: []const Air.Inst.Index = @ptrCast(air.extra[cond_extra.end..][0..cond_extra.data.then_body_len]);
+                const else_body: []const Air.Inst.Index = @ptrCast(air.extra[cond_extra.end + cond_extra.data.then_body_len ..][0..cond_extra.data.else_body_len]);
+                if (then_body.len > 1 and air_tags[@intFromEnum(then_body[1])] != .unreach)
+                    return .complex;
+                if (else_body.len > 1 and air_tags[@intFromEnum(else_body[1])] != .unreach)
                     return .complex;
 
                 var operand_live: bool = true;
-                for (air.extra[cond_extra.end..][0..2]) |cond_inst| {
-                    if (l.categorizeOperand(air, cond_inst, operand) == .tomb)
+                for (&[_]Air.Inst.Index{ then_body[0], else_body[0] }) |cond_inst| {
+                    if (l.categorizeOperand(air, cond_inst, operand, ip) == .tomb)
                         operand_live = false;
 
-                    switch (air_tags[cond_inst]) {
+                    switch (air_tags[@intFromEnum(cond_inst)]) {
                         .br => { // Breaks immediately back to block
-                            const br = air_datas[cond_inst].br;
+                            const br = air_datas[@intFromEnum(cond_inst)].br;
                             if (br.block_inst != inst)
                                 return .complex;
                         },
@@ -664,7 +665,7 @@ pub fn categorizeOperand(
             return .complex;
         },
         .wasm_memory_grow => {
-            const pl_op = air_datas[inst].pl_op;
+            const pl_op = air_datas[@intFromEnum(inst)].pl_op;
             if (pl_op.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
             return .none;
         },
@@ -699,11 +700,11 @@ pub fn getCondBr(l: Liveness, inst: Air.Inst.Index) CondBrSlices {
     index += 1;
     const else_death_count = l.extra[index];
     index += 1;
-    const then_deaths = l.extra[index..][0..then_death_count];
+    const then_deaths: []const Air.Inst.Index = @ptrCast(l.extra[index..][0..then_death_count]);
     index += then_death_count;
     return .{
         .then_deaths = then_deaths,
-        .else_deaths = l.extra[index..][0..else_death_count],
+        .else_deaths = @ptrCast(l.extra[index..][0..else_death_count]),
     };
 }
 
@@ -729,13 +730,13 @@ pub fn getSwitchBr(l: Liveness, gpa: Allocator, inst: Air.Inst.Index, cases_len:
     while (case_i < cases_len - 1) : (case_i += 1) {
         const case_death_count: u32 = l.extra[index];
         index += 1;
-        const case_deaths = l.extra[index..][0..case_death_count];
+        const case_deaths: []const Air.Inst.Index = @ptrCast(l.extra[index..][0..case_death_count]);
         index += case_death_count;
         deaths.appendAssumeCapacity(case_deaths);
     }
     {
         // Else
-        const else_deaths = l.extra[index..][0..else_death_count];
+        const else_deaths: []const Air.Inst.Index = @ptrCast(l.extra[index..][0..else_death_count]);
         deaths.appendAssumeCapacity(else_deaths);
     }
     return SwitchBrTable{
@@ -754,7 +755,7 @@ pub fn getBlock(l: Liveness, inst: Air.Inst.Index) BlockSlices {
         .deaths = &.{},
     };
     const death_count = l.extra[index];
-    const deaths = l.extra[index + 1 ..][0..death_count];
+    const deaths: []const Air.Inst.Index = @ptrCast(l.extra[index + 1 ..][0..death_count]);
     return .{
         .deaths = deaths,
     };
@@ -805,20 +806,20 @@ pub const BigTomb = struct {
 
         const small_tombs = bpi - 1;
         if (this_bit_index < small_tombs) {
-            const dies = @truncate(u1, bt.tomb_bits >> @intCast(Liveness.OperandInt, this_bit_index)) != 0;
+            const dies = @as(u1, @truncate(bt.tomb_bits >> @as(Liveness.OperandInt, @intCast(this_bit_index)))) != 0;
             return dies;
         }
 
         const big_bit_index = this_bit_index - small_tombs;
         while (big_bit_index - bt.extra_offset * 31 >= 31) {
-            if (@truncate(u1, bt.extra[bt.extra_start + bt.extra_offset] >> 31) != 0) {
+            if (@as(u1, @truncate(bt.extra[bt.extra_start + bt.extra_offset] >> 31)) != 0) {
                 bt.reached_end = true;
                 return false;
             }
             bt.extra_offset += 1;
         }
-        const dies = @truncate(u1, bt.extra[bt.extra_start + bt.extra_offset] >>
-            @intCast(u5, big_bit_index - bt.extra_offset * 31)) != 0;
+        const dies = @as(u1, @truncate(bt.extra[bt.extra_start + bt.extra_offset] >>
+            @as(u5, @intCast(big_bit_index - bt.extra_offset * 31)))) != 0;
         return dies;
     }
 };
@@ -827,6 +828,7 @@ pub const BigTomb = struct {
 const Analysis = struct {
     gpa: Allocator,
     air: Air,
+    intern_pool: *const InternPool,
     tomb_bits: []usize,
     special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
     extra: std.ArrayListUnmanaged(u32),
@@ -834,7 +836,7 @@ const Analysis = struct {
     fn storeTombBits(a: *Analysis, inst: Air.Inst.Index, tomb_bits: Bpi) void {
         const usize_index = (inst * bpi) / @bitSizeOf(usize);
         a.tomb_bits[usize_index] |= @as(usize, tomb_bits) <<
-            @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi);
+            @as(Log2Int(usize), @intCast((inst % (@bitSizeOf(usize) / bpi)) * bpi));
     }
 
     fn addExtra(a: *Analysis, extra: anytype) Allocator.Error!u32 {
@@ -845,7 +847,7 @@ const Analysis = struct {
 
     fn addExtraAssumeCapacity(a: *Analysis, extra: anytype) u32 {
         const fields = std.meta.fields(@TypeOf(extra));
-        const result = @intCast(u32, a.extra.items.len);
+        const result = @as(u32, @intCast(a.extra.items.len));
         inline for (fields) |field| {
             a.extra.appendAssumeCapacity(switch (field.type) {
                 u32 => @field(extra, field.name),
@@ -870,71 +872,31 @@ fn analyzeBody(
     }
 }
 
-const ControlBranchInfo = struct {
-    branch_deaths: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .{},
-    live_set: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .{},
-};
-
-/// Helper function for running `analyzeBody`, but resetting `branch_deaths` and `live_set` to their
-/// original states before returning, returning the modified versions of them. Only makes sense in
-/// the `main_analysis` pass.
-fn analyzeBodyResetBranch(
-    a: *Analysis,
-    comptime pass: LivenessPass,
-    data: *LivenessPassData(pass),
-    body: []const Air.Inst.Index,
-) !ControlBranchInfo {
-    switch (pass) {
-        .main_analysis => {},
-        else => @compileError("Liveness.analyzeBodyResetBranch only makes sense in LivenessPass.main_analysis"),
-    }
-
-    const gpa = a.gpa;
-
-    const old_branch_deaths = try data.branch_deaths.clone(a.gpa);
-    defer {
-        data.branch_deaths.deinit(gpa);
-        data.branch_deaths = old_branch_deaths;
-    }
-
-    const old_live_set = try data.live_set.clone(a.gpa);
-    defer {
-        data.live_set.deinit(gpa);
-        data.live_set = old_live_set;
-    }
-
-    try analyzeBody(a, pass, data, body);
-
-    return .{
-        .branch_deaths = data.branch_deaths.move(),
-        .live_set = data.live_set.move(),
-    };
-}
-
 fn analyzeInst(
     a: *Analysis,
     comptime pass: LivenessPass,
     data: *LivenessPassData(pass),
     inst: Air.Inst.Index,
 ) Allocator.Error!void {
+    const ip = a.intern_pool;
     const inst_tags = a.air.instructions.items(.tag);
     const inst_datas = a.air.instructions.items(.data);
 
-    switch (inst_tags[inst]) {
+    switch (inst_tags[@intFromEnum(inst)]) {
         .add,
+        .add_safe,
         .add_optimized,
-        .addwrap,
-        .addwrap_optimized,
+        .add_wrap,
         .add_sat,
         .sub,
+        .sub_safe,
         .sub_optimized,
-        .subwrap,
-        .subwrap_optimized,
+        .sub_wrap,
         .sub_sat,
         .mul,
+        .mul_safe,
         .mul_optimized,
-        .mulwrap,
-        .mulwrap_optimized,
+        .mul_wrap,
         .mul_sat,
         .div_float,
         .div_float_optimized,
@@ -986,12 +948,12 @@ fn analyzeInst(
         .memset_safe,
         .memcpy,
         => {
-            const o = inst_datas[inst].bin_op;
+            const o = inst_datas[@intFromEnum(inst)].bin_op;
             return analyzeOperands(a, pass, data, inst, .{ o.lhs, o.rhs, .none });
         },
 
         .vector_store_elem => {
-            const o = inst_datas[inst].vector_store_elem;
+            const o = inst_datas[@intFromEnum(inst)].vector_store_elem;
             const extra = a.air.extraData(Air.Bin, o.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ o.vector_ptr, extra.lhs, extra.rhs });
         },
@@ -1003,8 +965,6 @@ fn analyzeInst(
         .dbg_stmt,
         .dbg_inline_begin,
         .dbg_inline_end,
-        .dbg_block_begin,
-        .dbg_block_end,
         .fence,
         .ret_addr,
         .frame_addr,
@@ -1017,9 +977,7 @@ fn analyzeInst(
         .work_group_id,
         => return analyzeOperands(a, pass, data, inst, .{ .none, .none, .none }),
 
-        .constant,
-        .const_ty,
-        => unreachable,
+        .inferred_alloc, .inferred_alloc_comptime => unreachable,
 
         .trap,
         .unreach,
@@ -1052,9 +1010,9 @@ fn analyzeInst(
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
         .array_to_slice,
-        .float_to_int,
-        .float_to_int_optimized,
-        .int_to_float,
+        .int_from_float,
+        .int_from_float_optimized,
+        .float_from_int,
         .get_union_tag,
         .clz,
         .ctz,
@@ -1066,8 +1024,9 @@ fn analyzeInst(
         .addrspace_cast,
         .c_va_arg,
         .c_va_copy,
+        .abs,
         => {
-            const o = inst_datas[inst].ty_op;
+            const o = inst_datas[@intFromEnum(inst)].ty_op;
             return analyzeOperands(a, pass, data, inst, .{ o.operand, .none, .none });
         },
 
@@ -1079,8 +1038,8 @@ fn analyzeInst(
         .is_non_err,
         .is_err_ptr,
         .is_non_err_ptr,
-        .ptrtoint,
-        .bool_to_int,
+        .int_from_ptr,
+        .int_from_bool,
         .is_named_enum_value,
         .tag_name,
         .error_name,
@@ -1093,7 +1052,6 @@ fn analyzeInst(
         .log,
         .log2,
         .log10,
-        .fabs,
         .floor,
         .ceil,
         .round,
@@ -1104,14 +1062,15 @@ fn analyzeInst(
         .set_err_return_trace,
         .c_va_end,
         => {
-            const operand = inst_datas[inst].un_op;
+            const operand = inst_datas[@intFromEnum(inst)].un_op;
             return analyzeOperands(a, pass, data, inst, .{ operand, .none, .none });
         },
 
         .ret,
+        .ret_safe,
         .ret_load,
         => {
-            const operand = inst_datas[inst].un_op;
+            const operand = inst_datas[@intFromEnum(inst)].un_op;
             return analyzeFuncEnd(a, pass, data, inst, .{ operand, .none, .none });
         },
 
@@ -1125,7 +1084,7 @@ fn analyzeInst(
         .slice_elem_ptr,
         .slice,
         => {
-            const ty_pl = inst_datas[inst].ty_pl;
+            const ty_pl = inst_datas[@intFromEnum(inst)].ty_pl;
             const extra = a.air.extraData(Air.Bin, ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.lhs, extra.rhs, .none });
         },
@@ -1133,24 +1092,24 @@ fn analyzeInst(
         .dbg_var_ptr,
         .dbg_var_val,
         => {
-            const operand = inst_datas[inst].pl_op.operand;
+            const operand = inst_datas[@intFromEnum(inst)].pl_op.operand;
             return analyzeOperands(a, pass, data, inst, .{ operand, .none, .none });
         },
 
         .prefetch => {
-            const prefetch = inst_datas[inst].prefetch;
+            const prefetch = inst_datas[@intFromEnum(inst)].prefetch;
             return analyzeOperands(a, pass, data, inst, .{ prefetch.ptr, .none, .none });
         },
 
         .call, .call_always_tail, .call_never_tail, .call_never_inline => {
-            const inst_data = inst_datas[inst].pl_op;
+            const inst_data = inst_datas[@intFromEnum(inst)].pl_op;
             const callee = inst_data.operand;
             const extra = a.air.extraData(Air.Call, inst_data.payload);
-            const args = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..extra.data.args_len]);
+            const args = @as([]const Air.Inst.Ref, @ptrCast(a.air.extra[extra.end..][0..extra.data.args_len]));
             if (args.len + 1 <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
                 buf[0] = callee;
-                std.mem.copy(Air.Inst.Ref, buf[1..], args);
+                @memcpy(buf[1..][0..args.len], args);
                 return analyzeOperands(a, pass, data, inst, buf);
             }
 
@@ -1165,31 +1124,31 @@ fn analyzeInst(
             return big.finish();
         },
         .select => {
-            const pl_op = inst_datas[inst].pl_op;
+            const pl_op = inst_datas[@intFromEnum(inst)].pl_op;
             const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ pl_op.operand, extra.lhs, extra.rhs });
         },
         .shuffle => {
-            const extra = a.air.extraData(Air.Shuffle, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.Shuffle, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.a, extra.b, .none });
         },
         .reduce, .reduce_optimized => {
-            const reduce = inst_datas[inst].reduce;
+            const reduce = inst_datas[@intFromEnum(inst)].reduce;
             return analyzeOperands(a, pass, data, inst, .{ reduce.operand, .none, .none });
         },
         .cmp_vector, .cmp_vector_optimized => {
-            const extra = a.air.extraData(Air.VectorCmp, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.VectorCmp, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.lhs, extra.rhs, .none });
         },
         .aggregate_init => {
-            const ty_pl = inst_datas[inst].ty_pl;
-            const aggregate_ty = a.air.getRefType(ty_pl.ty);
-            const len = @intCast(usize, aggregate_ty.arrayLen());
-            const elements = @ptrCast([]const Air.Inst.Ref, a.air.extra[ty_pl.payload..][0..len]);
+            const ty_pl = inst_datas[@intFromEnum(inst)].ty_pl;
+            const aggregate_ty = ty_pl.ty.toType();
+            const len = @as(usize, @intCast(aggregate_ty.arrayLenIp(ip)));
+            const elements = @as([]const Air.Inst.Ref, @ptrCast(a.air.extra[ty_pl.payload..][0..len]));
 
             if (elements.len <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
-                std.mem.copy(Air.Inst.Ref, &buf, elements);
+                @memcpy(buf[0..elements.len], elements);
                 return analyzeOperands(a, pass, data, inst, buf);
             }
 
@@ -1203,32 +1162,32 @@ fn analyzeInst(
             return big.finish();
         },
         .union_init => {
-            const extra = a.air.extraData(Air.UnionInit, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.UnionInit, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.init, .none, .none });
         },
         .struct_field_ptr, .struct_field_val => {
-            const extra = a.air.extraData(Air.StructField, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.StructField, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.struct_operand, .none, .none });
         },
         .field_parent_ptr => {
-            const extra = a.air.extraData(Air.FieldParentPtr, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.FieldParentPtr, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.field_ptr, .none, .none });
         },
         .cmpxchg_strong, .cmpxchg_weak => {
-            const extra = a.air.extraData(Air.Cmpxchg, inst_datas[inst].ty_pl.payload).data;
+            const extra = a.air.extraData(Air.Cmpxchg, inst_datas[@intFromEnum(inst)].ty_pl.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.ptr, extra.expected_value, extra.new_value });
         },
         .mul_add => {
-            const pl_op = inst_datas[inst].pl_op;
+            const pl_op = inst_datas[@intFromEnum(inst)].pl_op;
             const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ extra.lhs, extra.rhs, pl_op.operand });
         },
         .atomic_load => {
-            const ptr = inst_datas[inst].atomic_load.ptr;
+            const ptr = inst_datas[@intFromEnum(inst)].atomic_load.ptr;
             return analyzeOperands(a, pass, data, inst, .{ ptr, .none, .none });
         },
         .atomic_rmw => {
-            const pl_op = inst_datas[inst].pl_op;
+            const pl_op = inst_datas[@intFromEnum(inst)].pl_op;
             const extra = a.air.extraData(Air.AtomicRmw, pl_op.payload).data;
             return analyzeOperands(a, pass, data, inst, .{ pl_op.operand, extra.operand, .none });
         },
@@ -1236,11 +1195,11 @@ fn analyzeInst(
         .br => return analyzeInstBr(a, pass, data, inst),
 
         .assembly => {
-            const extra = a.air.extraData(Air.Asm, inst_datas[inst].ty_pl.payload);
+            const extra = a.air.extraData(Air.Asm, inst_datas[@intFromEnum(inst)].ty_pl.payload);
             var extra_i: usize = extra.end;
-            const outputs = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.outputs_len]);
+            const outputs = @as([]const Air.Inst.Ref, @ptrCast(a.air.extra[extra_i..][0..extra.data.outputs_len]));
             extra_i += outputs.len;
-            const inputs = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.inputs_len]);
+            const inputs = @as([]const Air.Inst.Ref, @ptrCast(a.air.extra[extra_i..][0..extra.data.inputs_len]));
             extra_i += inputs.len;
 
             const num_operands = simple: {
@@ -1255,7 +1214,7 @@ fn analyzeInst(
                 if (buf_index + inputs.len > buf.len) {
                     break :simple buf_index + inputs.len;
                 }
-                std.mem.copy(Air.Inst.Ref, buf[buf_index..], inputs);
+                @memcpy(buf[buf_index..][0..inputs.len], inputs);
                 return analyzeOperands(a, pass, data, inst, buf);
             };
 
@@ -1285,7 +1244,7 @@ fn analyzeInst(
         .switch_br => return analyzeInstSwitchBr(a, pass, data, inst),
 
         .wasm_memory_grow => {
-            const pl_op = inst_datas[inst].pl_op;
+            const pl_op = inst_datas[@intFromEnum(inst)].pl_op;
             return analyzeOperands(a, pass, data, inst, .{ pl_op.operand, .none, .none });
         },
     }
@@ -1302,75 +1261,55 @@ fn analyzeOperands(
     operands: [bpi - 1]Air.Inst.Ref,
 ) Allocator.Error!void {
     const gpa = a.gpa;
-    const inst_tags = a.air.instructions.items(.tag);
+    const ip = a.intern_pool;
 
     switch (pass) {
         .loop_analysis => {
             _ = data.live_set.remove(inst);
 
             for (operands) |op_ref| {
-                const operand = Air.refToIndex(op_ref) orelse continue;
-
-                // Don't compute any liveness for constants
-                switch (inst_tags[operand]) {
-                    .constant, .const_ty => continue,
-                    else => {},
-                }
-
+                const operand = op_ref.toIndexAllowNone() orelse continue;
                 _ = try data.live_set.put(gpa, operand, {});
             }
         },
 
         .main_analysis => {
-            const usize_index = (inst * bpi) / @bitSizeOf(usize);
+            const usize_index = (@intFromEnum(inst) * bpi) / @bitSizeOf(usize);
 
             // This logic must synchronize with `will_die_immediately` in `AnalyzeBigOperands.init`.
-            var immediate_death = false;
-            if (data.branch_deaths.remove(inst)) {
-                log.debug("[{}] %{}: resolved branch death to birth (immediate death)", .{ pass, inst });
-                immediate_death = true;
-                assert(!data.live_set.contains(inst));
-            } else if (data.live_set.remove(inst)) {
-                log.debug("[{}] %{}: removed from live set", .{ pass, inst });
-            } else {
-                log.debug("[{}] %{}: immediate death", .{ pass, inst });
-                immediate_death = true;
-            }
+            const immediate_death = if (data.live_set.remove(inst)) blk: {
+                log.debug("[{}] %{}: removed from live set", .{ pass, @intFromEnum(inst) });
+                break :blk false;
+            } else blk: {
+                log.debug("[{}] %{}: immediate death", .{ pass, @intFromEnum(inst) });
+                break :blk true;
+            };
 
-            var tomb_bits: Bpi = @as(Bpi, @boolToInt(immediate_death)) << (bpi - 1);
+            var tomb_bits: Bpi = @as(Bpi, @intFromBool(immediate_death)) << (bpi - 1);
 
             // If our result is unused and the instruction doesn't need to be lowered, backends will
             // skip the lowering of this instruction, so we don't want to record uses of operands.
             // That way, we can mark as many instructions as possible unused.
-            if (!immediate_death or a.air.mustLower(inst)) {
+            if (!immediate_death or a.air.mustLower(inst, ip)) {
                 // Note that it's important we iterate over the operands backwards, so that if a dying
                 // operand is used multiple times we mark its last use as its death.
                 var i = operands.len;
                 while (i > 0) {
                     i -= 1;
                     const op_ref = operands[i];
-                    const operand = Air.refToIndex(op_ref) orelse continue;
+                    const operand = op_ref.toIndexAllowNone() orelse continue;
 
-                    // Don't compute any liveness for constants
-                    switch (inst_tags[operand]) {
-                        .constant, .const_ty => continue,
-                        else => {},
-                    }
-
-                    const mask = @as(Bpi, 1) << @intCast(OperandInt, i);
+                    const mask = @as(Bpi, 1) << @as(OperandInt, @intCast(i));
 
                     if ((try data.live_set.fetchPut(gpa, operand, {})) == null) {
-                        log.debug("[{}] %{}: added %{} to live set (operand dies here)", .{ pass, inst, operand });
+                        log.debug("[{}] %{}: added %{} to live set (operand dies here)", .{ pass, @intFromEnum(inst), operand });
                         tomb_bits |= mask;
-                        if (data.branch_deaths.remove(operand)) {
-                            log.debug("[{}] %{}: resolved branch death of %{} to this usage", .{ pass, inst, operand });
-                        }
                     }
                 }
             }
 
             a.tomb_bits[usize_index] |= @as(usize, tomb_bits) <<
-                @intCast(Log2Int(usize), (inst % (@bitSizeOf(usize) / bpi)) * bpi);
+                @as(Log2Int(usize), @intCast((@intFromEnum(inst) % (@bitSizeOf(usize) / bpi)) * bpi));
         },
     }
 }
@@ -1391,17 +1330,6 @@ fn analyzeFuncEnd(
         },
 
         .main_analysis => {
-            const gpa = a.gpa;
-
-            // Note that we preserve previous branch deaths - anything that needs to die in our
-            // "parent" branch also needs to die for us.
-
-            try data.branch_deaths.ensureUnusedCapacity(gpa, data.live_set.count());
-            var it = data.live_set.keyIterator();
-            while (it.next()) |key| {
-                const alive = key.*;
-                data.branch_deaths.putAssumeCapacity(alive, {});
-            }
             data.live_set.clearRetainingCapacity();
         },
     }
@@ -1416,7 +1344,7 @@ fn analyzeInstBr(
     inst: Air.Inst.Index,
 ) !void {
     const inst_datas = a.air.instructions.items(.data);
-    const br = inst_datas[inst].br;
+    const br = inst_datas[@intFromEnum(inst)].br;
     const gpa = a.gpa;
 
     switch (pass) {
@@ -1427,26 +1355,6 @@ fn analyzeInstBr(
         .main_analysis => {
             const block_scope = data.block_scopes.get(br.block_inst).?; // we should always be breaking from an enclosing block
 
-            // We mostly preserve previous branch deaths - anything that should die for our
-            // enclosing branch should die for us too. However, if our break target requires such an
-            // operand to be alive, it's actually not something we want to kill, since its "last
-            // use" (i.e. the point at which it should die) is outside of our scope.
-            var it = block_scope.live_set.keyIterator();
-            while (it.next()) |key| {
-                const alive = key.*;
-                _ = data.branch_deaths.remove(alive);
-            }
-            log.debug("[{}] %{}: preserved branch deaths are {}", .{ pass, inst, fmtInstSet(&data.branch_deaths) });
-
-            // Anything that's currently alive but our target doesn't need becomes a branch death.
-            it = data.live_set.keyIterator();
-            while (it.next()) |key| {
-                const alive = key.*;
-                if (!block_scope.live_set.contains(alive)) {
-                    _ = try data.branch_deaths.put(gpa, alive, {});
-                    log.debug("[{}] %{}: added branch death of {}", .{ pass, inst, alive });
-                }
-            }
             const new_live_set = try block_scope.live_set.clone(gpa);
             data.live_set.deinit(gpa);
             data.live_set = new_live_set;
@@ -1463,9 +1371,9 @@ fn analyzeInstBlock(
     inst: Air.Inst.Index,
 ) !void {
     const inst_datas = a.air.instructions.items(.data);
-    const ty_pl = inst_datas[inst].ty_pl;
+    const ty_pl = inst_datas[@intFromEnum(inst)].ty_pl;
     const extra = a.air.extraData(Air.Block, ty_pl.payload);
-    const body = a.air.extra[extra.end..][0..extra.data.body_len];
+    const body: []const Air.Inst.Index = @ptrCast(a.air.extra[extra.end..][0..extra.data.body_len]);
 
     const gpa = a.gpa;
 
@@ -1495,7 +1403,7 @@ fn analyzeInstBlock(
 
             // If the block is noreturn, block deaths not only aren't useful, they're impossible to
             // find: there could be more stuff alive after the block than before it!
-            if (!a.air.getRefType(ty_pl.ty).isNoReturn()) {
+            if (!a.intern_pool.isNoReturn(ty_pl.ty.toType().ip_index)) {
                 // The block kills the difference in the live sets
                 const block_scope = data.block_scopes.get(inst).?;
                 const num_deaths = data.live_set.count() - block_scope.live_set.count();
@@ -1511,7 +1419,7 @@ fn analyzeInstBlock(
                     const alive = key.*;
                     if (!block_scope.live_set.contains(alive)) {
                         // Dies in block
-                        a.extra.appendAssumeCapacity(alive);
+                        a.extra.appendAssumeCapacity(@intFromEnum(alive));
                         measured_num += 1;
                     }
                 }
@@ -1520,7 +1428,7 @@ fn analyzeInstBlock(
                 log.debug("[{}] %{}: block deaths are {}", .{
                     pass,
                     inst,
-                    fmtInstList(a.extra.items[extra_index + 1 ..][0..num_deaths]),
+                    fmtInstList(@ptrCast(a.extra.items[extra_index + 1 ..][0..num_deaths])),
                 });
             }
         },
@@ -1534,8 +1442,8 @@ fn analyzeInstLoop(
     inst: Air.Inst.Index,
 ) !void {
     const inst_datas = a.air.instructions.items(.data);
-    const extra = a.air.extraData(Air.Block, inst_datas[inst].ty_pl.payload);
-    const body = a.air.extra[extra.end..][0..extra.data.body_len];
+    const extra = a.air.extraData(Air.Block, inst_datas[@intFromEnum(inst)].ty_pl.payload);
+    const body: []const Air.Inst.Index = @ptrCast(a.air.extra[extra.end..][0..extra.data.body_len]);
     const gpa = a.gpa;
 
     try analyzeOperands(a, pass, data, inst, .{ .none, .none, .none });
@@ -1553,13 +1461,13 @@ fn analyzeInstLoop(
             const num_breaks = data.breaks.count();
             try a.extra.ensureUnusedCapacity(gpa, 1 + num_breaks);
 
-            const extra_index = @intCast(u32, a.extra.items.len);
+            const extra_index = @as(u32, @intCast(a.extra.items.len));
             a.extra.appendAssumeCapacity(num_breaks);
 
             var it = data.breaks.keyIterator();
             while (it.next()) |key| {
                 const block_inst = key.*;
-                a.extra.appendAssumeCapacity(block_inst);
+                a.extra.appendAssumeCapacity(@intFromEnum(block_inst));
             }
             log.debug("[{}] %{}: includes breaks to {}", .{ pass, inst, fmtInstSet(&data.breaks) });
 
@@ -1571,7 +1479,7 @@ fn analyzeInstLoop(
             it = data.live_set.keyIterator();
             while (it.next()) |key| {
                 const alive = key.*;
-                a.extra.appendAssumeCapacity(alive);
+                a.extra.appendAssumeCapacity(@intFromEnum(alive));
             }
             log.debug("[{}] %{}: maintain liveness of {}", .{ pass, inst, fmtInstSet(&data.live_set) });
 
@@ -1596,21 +1504,17 @@ fn analyzeInstLoop(
             const extra_idx = a.special.fetchRemove(inst).?.value; // remove because this data does not exist after analysis
 
             const num_breaks = data.old_extra.items[extra_idx];
-            const breaks = data.old_extra.items[extra_idx + 1 ..][0..num_breaks];
+            const breaks: []const Air.Inst.Index = @ptrCast(data.old_extra.items[extra_idx + 1 ..][0..num_breaks]);
 
             const num_loop_live = data.old_extra.items[extra_idx + num_breaks + 1];
-            const loop_live = data.old_extra.items[extra_idx + num_breaks + 2 ..][0..num_loop_live];
+            const loop_live: []const Air.Inst.Index = @ptrCast(data.old_extra.items[extra_idx + num_breaks + 2 ..][0..num_loop_live]);
 
             // This is necessarily not in the same control flow branch, because loops are noreturn
             data.live_set.clearRetainingCapacity();
 
-            try data.live_set.ensureUnusedCapacity(gpa, @intCast(u32, loop_live.len));
+            try data.live_set.ensureUnusedCapacity(gpa, @intCast(loop_live.len));
             for (loop_live) |alive| {
                 data.live_set.putAssumeCapacity(alive, {});
-                // If the loop requires a branch death operand to be alive, it's not something we
-                // want to kill: its "last use" (i.e. the point at which it should die) is the loop
-                // body itself.
-                _ = data.branch_deaths.remove(alive);
             }
 
             log.debug("[{}] %{}: block live set is {}", .{ pass, inst, fmtInstSet(&data.live_set) });
@@ -1645,25 +1549,25 @@ fn analyzeInstCondBr(
     const gpa = a.gpa;
 
     const extra = switch (inst_type) {
-        .cond_br => a.air.extraData(Air.CondBr, inst_datas[inst].pl_op.payload),
-        .@"try" => a.air.extraData(Air.Try, inst_datas[inst].pl_op.payload),
-        .try_ptr => a.air.extraData(Air.TryPtr, inst_datas[inst].ty_pl.payload),
+        .cond_br => a.air.extraData(Air.CondBr, inst_datas[@intFromEnum(inst)].pl_op.payload),
+        .@"try" => a.air.extraData(Air.Try, inst_datas[@intFromEnum(inst)].pl_op.payload),
+        .try_ptr => a.air.extraData(Air.TryPtr, inst_datas[@intFromEnum(inst)].ty_pl.payload),
     };
 
     const condition = switch (inst_type) {
-        .cond_br, .@"try" => inst_datas[inst].pl_op.operand,
+        .cond_br, .@"try" => inst_datas[@intFromEnum(inst)].pl_op.operand,
         .try_ptr => extra.data.ptr,
     };
 
-    const then_body = switch (inst_type) {
-        .cond_br => a.air.extra[extra.end..][0..extra.data.then_body_len],
-        else => {}, // we won't use this
+    const then_body: []const Air.Inst.Index = switch (inst_type) {
+        .cond_br => @ptrCast(a.air.extra[extra.end..][0..extra.data.then_body_len]),
+        else => &.{}, // we won't use this
     };
 
-    const else_body = switch (inst_type) {
+    const else_body: []const Air.Inst.Index = @ptrCast(switch (inst_type) {
         .cond_br => a.air.extra[extra.end + then_body.len ..][0..extra.data.else_body_len],
         .@"try", .try_ptr => a.air.extra[extra.end..][0..extra.data.body_len],
-    };
+    });
 
     switch (pass) {
         .loop_analysis => {
@@ -1675,61 +1579,19 @@ fn analyzeInstCondBr(
         },
 
         .main_analysis => {
-            var then_info: ControlBranchInfo = switch (inst_type) {
-                .cond_br => try analyzeBodyResetBranch(a, pass, data, then_body),
-                .@"try", .try_ptr => blk: {
-                    var branch_deaths = try data.branch_deaths.clone(gpa);
-                    errdefer branch_deaths.deinit(gpa);
-                    var live_set = try data.live_set.clone(gpa);
-                    errdefer live_set.deinit(gpa);
-                    break :blk .{
-                        .branch_deaths = branch_deaths,
-                        .live_set = live_set,
-                    };
-                },
-            };
-            defer then_info.branch_deaths.deinit(gpa);
-            defer then_info.live_set.deinit(gpa);
-
-            // If this is a `try`, the "then body" (rest of the branch) might have referenced our
-            // result. If so, we want to avoid this value being considered live while analyzing the
-            // else branch.
             switch (inst_type) {
-                .cond_br => {},
-                .@"try", .try_ptr => _ = data.live_set.remove(inst),
+                .cond_br => try analyzeBody(a, pass, data, then_body),
+                .@"try", .try_ptr => {}, // The "then body" is just the remainder of this block
             }
+            var then_live = data.live_set.move();
+            defer then_live.deinit(gpa);
 
             try analyzeBody(a, pass, data, else_body);
-            var else_info: ControlBranchInfo = .{
-                .branch_deaths = data.branch_deaths.move(),
-                .live_set = data.live_set.move(),
-            };
-            defer else_info.branch_deaths.deinit(gpa);
-            defer else_info.live_set.deinit(gpa);
+            var else_live = data.live_set.move();
+            defer else_live.deinit(gpa);
 
-            // Any queued deaths shared between both branches can be queued for us instead
-            {
-                var it = then_info.branch_deaths.keyIterator();
-                while (it.next()) |key| {
-                    const death = key.*;
-                    if (else_info.branch_deaths.remove(death)) {
-                        // We'll remove it from then_deaths below
-                        try data.branch_deaths.put(gpa, death, {});
-                    }
-                }
-                log.debug("[{}] %{}: bubbled deaths {}", .{ pass, inst, fmtInstSet(&data.branch_deaths) });
-                it = data.branch_deaths.keyIterator();
-                while (it.next()) |key| {
-                    const death = key.*;
-                    assert(then_info.branch_deaths.remove(death));
-                }
-            }
-
-            log.debug("[{}] %{}: remaining 'then' branch deaths are {}", .{ pass, inst, fmtInstSet(&then_info.branch_deaths) });
-            log.debug("[{}] %{}: remaining 'else' branch deaths are {}", .{ pass, inst, fmtInstSet(&else_info.branch_deaths) });
-
-            // Deaths that occur in one branch but not another need to be made to occur at the start
-            // of the other branch.
+            // Operands which are alive in one branch but not the other need to die at the start of
+            // the peer branch.
 
             var then_mirrored_deaths: std.ArrayListUnmanaged(Air.Inst.Index) = .{};
             defer then_mirrored_deaths.deinit(gpa);
@@ -1737,14 +1599,12 @@ fn analyzeInstCondBr(
             var else_mirrored_deaths: std.ArrayListUnmanaged(Air.Inst.Index) = .{};
             defer else_mirrored_deaths.deinit(gpa);
 
-            // Note: this invalidates `else_info.live_set`, but expands `then_info.live_set` to
-            // be their union
+            // Note: this invalidates `else_live`, but expands `then_live` to be their union
             {
-                var it = then_info.live_set.keyIterator();
+                var it = then_live.keyIterator();
                 while (it.next()) |key| {
                     const death = key.*;
-                    if (else_info.live_set.remove(death)) continue; // removing makes the loop below faster
-                    if (else_info.branch_deaths.contains(death)) continue;
+                    if (else_live.remove(death)) continue; // removing makes the loop below faster
 
                     // If this is a `try`, the "then body" (rest of the branch) might have
                     // referenced our result. We want to avoid killing this value in the else branch
@@ -1756,16 +1616,14 @@ fn analyzeInstCondBr(
 
                     try else_mirrored_deaths.append(gpa, death);
                 }
-                // Since we removed common stuff above, `else_info.live_set` is now only operands
+                // Since we removed common stuff above, `else_live` is now only operands
                 // which are *only* alive in the else branch
-                it = else_info.live_set.keyIterator();
+                it = else_live.keyIterator();
                 while (it.next()) |key| {
                     const death = key.*;
-                    if (!then_info.branch_deaths.contains(death)) {
-                        try then_mirrored_deaths.append(gpa, death);
-                    }
-                    // Make `then_info.live_set` contain the full live set (i.e. union of both)
-                    try then_info.live_set.put(gpa, death, {});
+                    try then_mirrored_deaths.append(gpa, death);
+                    // Make `then_live` contain the full live set (i.e. union of both)
+                    try then_live.put(gpa, death, {});
                 }
             }
 
@@ -1773,29 +1631,20 @@ fn analyzeInstCondBr(
             log.debug("[{}] %{}: 'else' branch mirrored deaths are {}", .{ pass, inst, fmtInstList(else_mirrored_deaths.items) });
 
             data.live_set.deinit(gpa);
-            data.live_set = then_info.live_set.move();
+            data.live_set = then_live.move(); // Really the union of both live sets
 
             log.debug("[{}] %{}: new live set is {}", .{ pass, inst, fmtInstSet(&data.live_set) });
 
-            // Write the branch deaths to `extra`
-            const then_death_count = then_info.branch_deaths.count() + @intCast(u32, then_mirrored_deaths.items.len);
-            const else_death_count = else_info.branch_deaths.count() + @intCast(u32, else_mirrored_deaths.items.len);
-
+            // Write the mirrored deaths to `extra`
+            const then_death_count = @as(u32, @intCast(then_mirrored_deaths.items.len));
+            const else_death_count = @as(u32, @intCast(else_mirrored_deaths.items.len));
             try a.extra.ensureUnusedCapacity(gpa, std.meta.fields(CondBr).len + then_death_count + else_death_count);
             const extra_index = a.addExtraAssumeCapacity(CondBr{
                 .then_death_count = then_death_count,
                 .else_death_count = else_death_count,
             });
-            a.extra.appendSliceAssumeCapacity(then_mirrored_deaths.items);
-            {
-                var it = then_info.branch_deaths.keyIterator();
-                while (it.next()) |key| a.extra.appendAssumeCapacity(key.*);
-            }
-            a.extra.appendSliceAssumeCapacity(else_mirrored_deaths.items);
-            {
-                var it = else_info.branch_deaths.keyIterator();
-                while (it.next()) |key| a.extra.appendAssumeCapacity(key.*);
-            }
+            a.extra.appendSliceAssumeCapacity(@ptrCast(then_mirrored_deaths.items));
+            a.extra.appendSliceAssumeCapacity(@ptrCast(else_mirrored_deaths.items));
             try a.special.put(gpa, inst, extra_index);
         },
     }
@@ -1810,7 +1659,7 @@ fn analyzeInstSwitchBr(
     inst: Air.Inst.Index,
 ) !void {
     const inst_datas = a.air.instructions.items(.data);
-    const pl_op = inst_datas[inst].pl_op;
+    const pl_op = inst_datas[@intFromEnum(inst)].pl_op;
     const condition = pl_op.operand;
     const switch_br = a.air.extraData(Air.SwitchBr, pl_op.payload);
     const gpa = a.gpa;
@@ -1821,12 +1670,12 @@ fn analyzeInstSwitchBr(
             var air_extra_index: usize = switch_br.end;
             for (0..ncases) |_| {
                 const case = a.air.extraData(Air.SwitchBr.Case, air_extra_index);
-                const case_body = a.air.extra[case.end + case.data.items_len ..][0..case.data.body_len];
+                const case_body: []const Air.Inst.Index = @ptrCast(a.air.extra[case.end + case.data.items_len ..][0..case.data.body_len]);
                 air_extra_index = case.end + case.data.items_len + case_body.len;
                 try analyzeBody(a, pass, data, case_body);
             }
             { // else
-                const else_body = a.air.extra[air_extra_index..][0..switch_br.data.else_body_len];
+                const else_body: []const Air.Inst.Index = @ptrCast(a.air.extra[air_extra_index..][0..switch_br.data.else_body_len]);
                 try analyzeBody(a, pass, data, else_body);
             }
         },
@@ -1838,87 +1687,50 @@ fn analyzeInstSwitchBr(
             const DeathSet = std.AutoHashMapUnmanaged(Air.Inst.Index, void);
             const DeathList = std.ArrayListUnmanaged(Air.Inst.Index);
 
-            var case_infos = try gpa.alloc(ControlBranchInfo, ncases + 1); // +1 for else
-            defer gpa.free(case_infos);
+            var case_live_sets = try gpa.alloc(std.AutoHashMapUnmanaged(Air.Inst.Index, void), ncases + 1); // +1 for else
+            defer gpa.free(case_live_sets);
 
-            std.mem.set(ControlBranchInfo, case_infos, .{});
-            defer for (case_infos) |*info| {
-                info.branch_deaths.deinit(gpa);
-                info.live_set.deinit(gpa);
-            };
+            @memset(case_live_sets, .{});
+            defer for (case_live_sets) |*live_set| live_set.deinit(gpa);
 
             var air_extra_index: usize = switch_br.end;
-            for (case_infos[0..ncases]) |*info| {
+            for (case_live_sets[0..ncases]) |*live_set| {
                 const case = a.air.extraData(Air.SwitchBr.Case, air_extra_index);
-                const case_body = a.air.extra[case.end + case.data.items_len ..][0..case.data.body_len];
+                const case_body: []const Air.Inst.Index = @ptrCast(a.air.extra[case.end + case.data.items_len ..][0..case.data.body_len]);
                 air_extra_index = case.end + case.data.items_len + case_body.len;
-                info.* = try analyzeBodyResetBranch(a, pass, data, case_body);
+                try analyzeBody(a, pass, data, case_body);
+                live_set.* = data.live_set.move();
             }
             { // else
-                const else_body = a.air.extra[air_extra_index..][0..switch_br.data.else_body_len];
+                const else_body: []const Air.Inst.Index = @ptrCast(a.air.extra[air_extra_index..][0..switch_br.data.else_body_len]);
                 try analyzeBody(a, pass, data, else_body);
-                case_infos[ncases] = .{
-                    .branch_deaths = data.branch_deaths.move(),
-                    .live_set = data.live_set.move(),
-                };
-            }
-
-            // Queued deaths common to all cases can be bubbled up
-            {
-                // We can't remove from the set we're iterating over, so we'll store the shared deaths here
-                // temporarily to remove them
-                var shared_deaths: DeathSet = .{};
-                defer shared_deaths.deinit(gpa);
-
-                var it = case_infos[0].branch_deaths.keyIterator();
-                while (it.next()) |key| {
-                    const death = key.*;
-                    for (case_infos[1..]) |*info| {
-                        if (!info.branch_deaths.contains(death)) break;
-                    } else try shared_deaths.put(gpa, death, {});
-                }
-
-                log.debug("[{}] %{}: bubbled deaths {}", .{ pass, inst, fmtInstSet(&shared_deaths) });
-
-                try data.branch_deaths.ensureUnusedCapacity(gpa, shared_deaths.count());
-                it = shared_deaths.keyIterator();
-                while (it.next()) |key| {
-                    const death = key.*;
-                    data.branch_deaths.putAssumeCapacity(death, {});
-                    for (case_infos) |*info| {
-                        _ = info.branch_deaths.remove(death);
-                    }
-                }
-
-                for (case_infos, 0..) |*info, i| {
-                    log.debug("[{}] %{}: case {} remaining branch deaths are {}", .{ pass, inst, i, fmtInstSet(&info.branch_deaths) });
-                }
+                case_live_sets[ncases] = data.live_set.move();
             }
 
             const mirrored_deaths = try gpa.alloc(DeathList, ncases + 1);
             defer gpa.free(mirrored_deaths);
 
-            std.mem.set(DeathList, mirrored_deaths, .{});
+            @memset(mirrored_deaths, .{});
             defer for (mirrored_deaths) |*md| md.deinit(gpa);
 
             {
                 var all_alive: DeathSet = .{};
                 defer all_alive.deinit(gpa);
 
-                for (case_infos) |*info| {
-                    try all_alive.ensureUnusedCapacity(gpa, info.live_set.count());
-                    var it = info.live_set.keyIterator();
+                for (case_live_sets) |*live_set| {
+                    try all_alive.ensureUnusedCapacity(gpa, live_set.count());
+                    var it = live_set.keyIterator();
                     while (it.next()) |key| {
                         const alive = key.*;
                         all_alive.putAssumeCapacity(alive, {});
                     }
                 }
 
-                for (mirrored_deaths, case_infos) |*mirrored, *info| {
+                for (mirrored_deaths, case_live_sets) |*mirrored, *live_set| {
                     var it = all_alive.keyIterator();
                     while (it.next()) |key| {
                         const alive = key.*;
-                        if (!info.live_set.contains(alive) and !info.branch_deaths.contains(alive)) {
+                        if (!live_set.contains(alive)) {
                             // Should die at the start of this branch
                             try mirrored.append(gpa, alive);
                         }
@@ -1935,27 +1747,18 @@ fn analyzeInstSwitchBr(
                 log.debug("[{}] %{}: new live set is {}", .{ pass, inst, fmtInstSet(&data.live_set) });
             }
 
-            const else_death_count = case_infos[ncases].branch_deaths.count() + @intCast(u32, mirrored_deaths[ncases].items.len);
-
+            const else_death_count = @as(u32, @intCast(mirrored_deaths[ncases].items.len));
             const extra_index = try a.addExtra(SwitchBr{
                 .else_death_count = else_death_count,
             });
-            for (mirrored_deaths[0..ncases], case_infos[0..ncases]) |mirrored, info| {
-                const num = info.branch_deaths.count() + @intCast(u32, mirrored.items.len);
+            for (mirrored_deaths[0..ncases]) |mirrored| {
+                const num = @as(u32, @intCast(mirrored.items.len));
                 try a.extra.ensureUnusedCapacity(gpa, num + 1);
                 a.extra.appendAssumeCapacity(num);
-                a.extra.appendSliceAssumeCapacity(mirrored.items);
-                {
-                    var it = info.branch_deaths.keyIterator();
-                    while (it.next()) |key| a.extra.appendAssumeCapacity(key.*);
-                }
+                a.extra.appendSliceAssumeCapacity(@ptrCast(mirrored.items));
             }
             try a.extra.ensureUnusedCapacity(gpa, else_death_count);
-            a.extra.appendSliceAssumeCapacity(mirrored_deaths[ncases].items);
-            {
-                var it = case_infos[ncases].branch_deaths.keyIterator();
-                while (it.next()) |key| a.extra.appendAssumeCapacity(key.*);
-            }
+            a.extra.appendSliceAssumeCapacity(@ptrCast(mirrored_deaths[ncases].items));
             try a.special.put(gpa, inst, extra_index);
         },
     }
@@ -1984,7 +1787,7 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
             inst: Air.Inst.Index,
             total_operands: usize,
         ) !Self {
-            const extra_operands = @intCast(u32, total_operands) -| (bpi - 1);
+            const extra_operands = @as(u32, @intCast(total_operands)) -| (bpi - 1);
             const max_extra_tombs = (extra_operands + 30) / 31;
 
             const extra_tombs: []u32 = switch (pass) {
@@ -1993,18 +1796,18 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
             };
             errdefer a.gpa.free(extra_tombs);
 
-            std.mem.set(u32, extra_tombs, 0);
+            @memset(extra_tombs, 0);
 
             const will_die_immediately: bool = switch (pass) {
                 .loop_analysis => false, // track everything, since we don't have full liveness information yet
-                .main_analysis => data.branch_deaths.contains(inst) and !data.live_set.contains(inst),
+                .main_analysis => !data.live_set.contains(inst),
             };
 
             return .{
                 .a = a,
                 .data = data,
                 .inst = inst,
-                .operands_remaining = @intCast(u32, total_operands),
+                .operands_remaining = @as(u32, @intCast(total_operands)),
                 .extra_tombs = extra_tombs,
                 .will_die_immediately = will_die_immediately,
             };
@@ -2012,6 +1815,7 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
 
         /// Must be called with operands in reverse order.
         fn feed(big: *Self, op_ref: Air.Inst.Ref) !void {
+            const ip = big.a.intern_pool;
             // Note that after this, `operands_remaining` becomes the index of the current operand
             big.operands_remaining -= 1;
 
@@ -2020,22 +1824,15 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
                 return;
             }
 
-            const operand = Air.refToIndex(op_ref) orelse return;
-
-            // Don't compute any liveness for constants
-            const inst_tags = big.a.air.instructions.items(.tag);
-            switch (inst_tags[operand]) {
-                .constant, .const_ty => return,
-                else => {},
-            }
+            const operand = op_ref.toIndex() orelse return;
 
             // If our result is unused and the instruction doesn't need to be lowered, backends will
             // skip the lowering of this instruction, so we don't want to record uses of operands.
             // That way, we can mark as many instructions as possible unused.
-            if (big.will_die_immediately and !big.a.air.mustLower(big.inst)) return;
+            if (big.will_die_immediately and !big.a.air.mustLower(big.inst, ip)) return;
 
             const extra_byte = (big.operands_remaining - (bpi - 1)) / 31;
-            const extra_bit = @intCast(u5, big.operands_remaining - (bpi - 1) - extra_byte * 31);
+            const extra_bit = @as(u5, @intCast(big.operands_remaining - (bpi - 1) - extra_byte * 31));
 
             const gpa = big.a.gpa;
 
@@ -2048,9 +1845,6 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
                     if ((try big.data.live_set.fetchPut(gpa, operand, {})) == null) {
                         log.debug("[{}] %{}: added %{} to live set (operand dies here)", .{ pass, big.inst, operand });
                         big.extra_tombs[extra_byte] |= @as(u32, 1) << extra_bit;
-                        if (big.data.branch_deaths.remove(operand)) {
-                            log.debug("[{}] %{}: resolved branch death of %{} to this usage", .{ pass, big.inst, operand });
-                        }
                     }
                 },
             }
@@ -2072,7 +1866,7 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
                     // keep at least one.
                     var num: usize = big.extra_tombs.len;
                     while (num > 1) {
-                        if (@truncate(u31, big.extra_tombs[num - 1]) != 0) {
+                        if (@as(u31, @truncate(big.extra_tombs[num - 1])) != 0) {
                             // Some operand dies here
                             break;
                         }
@@ -2083,7 +1877,7 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
 
                     const extra_tombs = big.extra_tombs[0..num];
 
-                    const extra_index = @intCast(u32, big.a.extra.items.len);
+                    const extra_index = @as(u32, @intCast(big.a.extra.items.len));
                     try big.a.extra.appendSlice(gpa, extra_tombs);
                     try big.a.special.put(gpa, big.inst, extra_index);
                 },

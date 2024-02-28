@@ -1,6 +1,5 @@
 const std = @import("std.zig");
 const builtin = @import("builtin");
-const cstr = std.cstr;
 const unicode = std.unicode;
 const io = std.io;
 const fs = std.fs;
@@ -13,8 +12,6 @@ const mem = std.mem;
 const math = std.math;
 const debug = std.debug;
 const EnvMap = process.EnvMap;
-const Os = std.builtin.Os;
-const TailQueue = std.TailQueue;
 const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
 
@@ -93,7 +90,7 @@ pub const ChildProcess = struct {
             switch (builtin.os.tag) {
                 .linux => {
                     if (rus.rusage) |ru| {
-                        return @intCast(usize, ru.maxrss) * 1024;
+                        return @as(usize, @intCast(ru.maxrss)) * 1024;
                     } else {
                         return null;
                     }
@@ -108,7 +105,7 @@ pub const ChildProcess = struct {
                 .macos, .ios => {
                     if (rus.rusage) |ru| {
                         // Darwin oddly reports in bytes instead of kilobytes.
-                        return @intCast(usize, ru.maxrss);
+                        return @as(usize, @intCast(ru.maxrss));
                     } else {
                         return null;
                     }
@@ -132,10 +129,9 @@ pub const ChildProcess = struct {
         /// POSIX-only. `StdIo.Ignore` was selected and opening `/dev/null` returned ENODEV.
         NoDevice,
 
-        /// Windows-only. One of:
-        /// * `cwd` was provided and it could not be re-encoded into UTF16LE, or
-        /// * The `PATH` or `PATHEXT` environment variable contained invalid UTF-8.
-        InvalidUtf8,
+        /// Windows-only. `cwd` or `argv` was provided and it was invalid WTF-8.
+        /// https://simonsapin.github.io/wtf-8/
+        InvalidWtf8,
 
         /// Windows-only. `cwd` was provided, but the path did not exist when spawning the child process.
         CurrentWorkingDirectoryUnlinked,
@@ -224,7 +220,18 @@ pub const ChildProcess = struct {
             return term;
         }
 
-        try windows.TerminateProcess(self.id, exit_code);
+        windows.TerminateProcess(self.id, exit_code) catch |err| switch (err) {
+            error.PermissionDenied => {
+                // Usually when TerminateProcess triggers a ACCESS_DENIED error, it
+                // indicates that the process has already exited, but there may be
+                // some rare edge cases where our process handle no longer has the
+                // PROCESS_TERMINATE access right, so let's do another check to make
+                // sure the process is really no longer running:
+                windows.WaitForSingleObjectEx(self.id, 0, false) catch return err;
+                return error.AlreadyTerminated;
+            },
+            else => return err,
+        };
         try self.waitUnwrappedWindows();
         return self.term.?;
     }
@@ -234,7 +241,10 @@ pub const ChildProcess = struct {
             self.cleanupStreams();
             return term;
         }
-        try os.kill(self.id, os.SIG.TERM);
+        os.kill(self.id, os.SIG.TERM) catch |err| switch (err) {
+            error.ProcessNotFound => return error.AlreadyTerminated,
+            else => return err,
+        };
         try self.waitUnwrapped();
         return self.term.?;
     }
@@ -251,7 +261,7 @@ pub const ChildProcess = struct {
         return term;
     }
 
-    pub const ExecResult = struct {
+    pub const RunResult = struct {
         term: Term,
         stdout: []u8,
         stderr: []u8,
@@ -259,7 +269,7 @@ pub const ChildProcess = struct {
 
     fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
         if (fifo.head > 0) {
-            std.mem.copy(u8, fifo.buf[0..fifo.count], fifo.buf[fifo.head .. fifo.head + fifo.count]);
+            @memcpy(fifo.buf[0..fifo.count], fifo.buf[fifo.head..][0..fifo.count]);
         }
         const result = std.ArrayList(u8){
             .items = fifo.buf[0..fifo.count],
@@ -287,7 +297,9 @@ pub const ChildProcess = struct {
         // we could make this work with multiple allocators but YAGNI
         if (stdout.allocator.ptr != stderr.allocator.ptr or
             stdout.allocator.vtable != stderr.allocator.vtable)
-            @panic("ChildProcess.collectOutput only supports 1 allocator");
+        {
+            unreachable; // ChildProcess.collectOutput only supports 1 allocator
+        }
 
         var poller = std.io.poll(stdout.allocator, enum { stdout, stderr }, .{
             .stdout = child.stdout.?,
@@ -306,14 +318,14 @@ pub const ChildProcess = struct {
         stderr.* = fifoToOwnedArrayList(poller.fifo(.stderr));
     }
 
-    pub const ExecError = os.GetCwdError || os.ReadError || SpawnError || os.PollError || error{
+    pub const RunError = os.GetCwdError || os.ReadError || SpawnError || os.PollError || error{
         StdoutStreamTooLong,
         StderrStreamTooLong,
     };
 
     /// Spawns a child process, waits for it, collecting stdout and stderr, and then returns.
     /// If it succeeds, the caller owns result.stdout and result.stderr memory.
-    pub fn exec(args: struct {
+    pub fn run(args: struct {
         allocator: mem.Allocator,
         argv: []const []const u8,
         cwd: ?[]const u8 = null,
@@ -321,7 +333,7 @@ pub const ChildProcess = struct {
         env_map: ?*const EnvMap = null,
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
-    }) ExecError!ExecResult {
+    }) RunError!RunResult {
         var child = ChildProcess.init(args.argv, args.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
@@ -341,7 +353,7 @@ pub const ChildProcess = struct {
         try child.spawn();
         try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
 
-        return ExecResult{
+        return RunResult{
             .term = try child.wait(),
             .stdout = try stdout.toOwnedSlice(),
             .stderr = try stderr.toOwnedSlice(),
@@ -376,7 +388,7 @@ pub const ChildProcess = struct {
             if (windows.kernel32.GetExitCodeProcess(self.id, &exit_code) == 0) {
                 break :x Term{ .Unknown = 0 };
             } else {
-                break :x Term{ .Exited = @truncate(u8, exit_code) };
+                break :x Term{ .Exited = @as(u8, @truncate(exit_code)) };
             }
         });
 
@@ -449,7 +461,7 @@ pub const ChildProcess = struct {
                 // has a value greater than 0
                 if ((fd[0].revents & std.os.POLL.IN) != 0) {
                     const err_int = try readIntFd(err_pipe[0]);
-                    return @errSetCast(SpawnError, @intToError(err_int));
+                    return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
                 }
             } else {
                 // Write maxInt(ErrInt) to the write end of the err_pipe. This is after
@@ -462,7 +474,7 @@ pub const ChildProcess = struct {
                 // Here we potentially return the fork child's error from the parent
                 // pid.
                 if (err_int != maxInt(ErrInt)) {
-                    return @errSetCast(SpawnError, @intToError(err_int));
+                    return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
                 }
             }
         }
@@ -482,7 +494,7 @@ pub const ChildProcess = struct {
     }
 
     fn spawnPosix(self: *ChildProcess) SpawnError!void {
-        const pipe_flags = if (io.is_async) os.O.NONBLOCK else 0;
+        const pipe_flags: os.O = .{};
         const stdin_pipe = if (self.stdin_behavior == StdIo.Pipe) try os.pipe2(pipe_flags) else undefined;
         errdefer if (self.stdin_behavior == StdIo.Pipe) {
             destroyPipe(stdin_pipe);
@@ -500,15 +512,15 @@ pub const ChildProcess = struct {
 
         const any_ignore = (self.stdin_behavior == StdIo.Ignore or self.stdout_behavior == StdIo.Ignore or self.stderr_behavior == StdIo.Ignore);
         const dev_null_fd = if (any_ignore)
-            os.openZ("/dev/null", os.O.RDWR, 0) catch |err| switch (err) {
+            os.openZ("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch |err| switch (err) {
                 error.PathAlreadyExists => unreachable,
                 error.NoSpaceLeft => unreachable,
                 error.FileTooBig => unreachable,
                 error.DeviceBusy => unreachable,
                 error.FileLocksNotSupported => unreachable,
                 error.BadPathName => unreachable, // Windows-only
-                error.InvalidHandle => unreachable, // WASI-only
                 error.WouldBlock => unreachable,
+                error.NetworkNotFound => unreachable, // Windows-only
                 else => |e| return e,
             }
         else
@@ -530,7 +542,7 @@ pub const ChildProcess = struct {
         // can fail between fork() and execve().
         // Therefore, we do all the allocation for the execve() before the fork().
         // This means we must do the null-termination of argv and env vars here.
-        const argv_buf = try arena.allocSentinel(?[*:0]u8, self.argv.len, null);
+        const argv_buf = try arena.allocSentinel(?[*:0]const u8, self.argv.len, null);
         for (self.argv, 0..) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
 
         const envp = m: {
@@ -542,7 +554,7 @@ pub const ChildProcess = struct {
             } else if (builtin.output_mode == .Exe) {
                 // Then we have Zig start code and this works.
                 // TODO type-safety for null-termination of `os.environ`.
-                break :m @ptrCast([*:null]?[*:0]u8, os.environ.ptr);
+                break :m @as([*:null]const ?[*:0]const u8, @ptrCast(os.environ.ptr));
             } else {
                 // TODO come up with a solution for this.
                 @compileError("missing std lib enhancement: ChildProcess implementation has no way to collect the environment variables to forward to the child process");
@@ -558,7 +570,7 @@ pub const ChildProcess = struct {
                 // end with eventfd
                 break :blk [2]os.fd_t{ fd, fd };
             } else {
-                break :blk try os.pipe2(os.O.CLOEXEC);
+                break :blk try os.pipe2(.{ .CLOEXEC = true });
             }
         };
         errdefer destroyPipe(err_pipe);
@@ -605,7 +617,7 @@ pub const ChildProcess = struct {
         }
 
         // we are the parent
-        const pid = @intCast(i32, pid_result);
+        const pid = @as(i32, @intCast(pid_result));
         if (self.stdin_behavior == StdIo.Pipe) {
             self.stdin = File{ .handle = stdin_pipe[1] };
         } else {
@@ -638,7 +650,7 @@ pub const ChildProcess = struct {
     }
 
     fn spawnWindows(self: *ChildProcess) SpawnError!void {
-        const saAttr = windows.SECURITY_ATTRIBUTES{
+        var saAttr = windows.SECURITY_ATTRIBUTES{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .bInheritHandle = windows.TRUE,
             .lpSecurityDescriptor = null,
@@ -649,26 +661,25 @@ pub const ChildProcess = struct {
         const nul_handle = if (any_ignore)
             // "\Device\Null" or "\??\NUL"
             windows.OpenFile(&[_]u16{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
-                .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
-                .share_access = windows.FILE_SHARE_READ,
+                .access_mask = windows.GENERIC_READ | windows.GENERIC_WRITE | windows.SYNCHRONIZE,
+                .share_access = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+                .sa = &saAttr,
                 .creation = windows.OPEN_EXISTING,
-                .io_mode = .blocking,
             }) catch |err| switch (err) {
-                error.PathAlreadyExists => unreachable, // not possible for "NUL"
-                error.PipeBusy => unreachable, // not possible for "NUL"
-                error.FileNotFound => unreachable, // not possible for "NUL"
-                error.AccessDenied => unreachable, // not possible for "NUL"
-                error.NameTooLong => unreachable, // not possible for "NUL"
-                error.WouldBlock => unreachable, // not possible for "NUL"
+                error.PathAlreadyExists => return error.Unexpected, // not possible for "NUL"
+                error.PipeBusy => return error.Unexpected, // not possible for "NUL"
+                error.FileNotFound => return error.Unexpected, // not possible for "NUL"
+                error.AccessDenied => return error.Unexpected, // not possible for "NUL"
+                error.NameTooLong => return error.Unexpected, // not possible for "NUL"
+                error.WouldBlock => return error.Unexpected, // not possible for "NUL"
+                error.NetworkNotFound => return error.Unexpected, // not possible for "NUL"
+                error.AntivirusInterference => return error.Unexpected, // not possible for "NUL"
                 else => |e| return e,
             }
         else
             undefined;
         defer {
             if (any_ignore) os.close(nul_handle);
-        }
-        if (any_ignore) {
-            try windows.SetHandleInformation(nul_handle, windows.HANDLE_FLAG_INHERIT, 0);
         }
 
         var g_hChildStd_IN_Rd: ?windows.HANDLE = null;
@@ -707,7 +718,7 @@ pub const ChildProcess = struct {
                 g_hChildStd_OUT_Wr = null;
             },
         }
-        errdefer if (self.stdin_behavior == StdIo.Pipe) {
+        errdefer if (self.stdout_behavior == StdIo.Pipe) {
             windowsDestroyPipe(g_hChildStd_OUT_Rd, g_hChildStd_OUT_Wr);
         };
 
@@ -727,12 +738,9 @@ pub const ChildProcess = struct {
                 g_hChildStd_ERR_Wr = null;
             },
         }
-        errdefer if (self.stdin_behavior == StdIo.Pipe) {
+        errdefer if (self.stderr_behavior == StdIo.Pipe) {
             windowsDestroyPipe(g_hChildStd_ERR_Rd, g_hChildStd_ERR_Wr);
         };
-
-        const cmd_line = try windowsCreateCommandLine(self.allocator, self.argv);
-        defer self.allocator.free(cmd_line);
 
         var siStartInfo = windows.STARTUPINFOW{
             .cb = @sizeOf(windows.STARTUPINFOW),
@@ -757,7 +765,7 @@ pub const ChildProcess = struct {
         };
         var piProcInfo: windows.PROCESS_INFORMATION = undefined;
 
-        const cwd_w = if (self.cwd) |cwd| try unicode.utf8ToUtf16LeWithNull(self.allocator, cwd) else null;
+        const cwd_w = if (self.cwd) |cwd| try unicode.wtf8ToWtf16LeAllocZ(self.allocator, cwd) else null;
         defer if (cwd_w) |cwd| self.allocator.free(cwd);
         const cwd_w_ptr = if (cwd_w) |cwd| cwd.ptr else null;
 
@@ -765,8 +773,8 @@ pub const ChildProcess = struct {
         defer if (maybe_envp_buf) |envp_buf| self.allocator.free(envp_buf);
         const envp_ptr = if (maybe_envp_buf) |envp_buf| envp_buf.ptr else null;
 
-        const app_name_utf8 = self.argv[0];
-        const app_name_is_absolute = fs.path.isAbsolute(app_name_utf8);
+        const app_name_wtf8 = self.argv[0];
+        const app_name_is_absolute = fs.path.isAbsolute(app_name_wtf8);
 
         // the cwd set in ChildProcess is in effect when choosing the executable path
         // to match posix semantics
@@ -775,11 +783,11 @@ pub const ChildProcess = struct {
             // If the app name is absolute, then we need to use its dirname as the cwd
             if (app_name_is_absolute) {
                 cwd_path_w_needs_free = true;
-                const dir = fs.path.dirname(app_name_utf8).?;
-                break :x try unicode.utf8ToUtf16LeWithNull(self.allocator, dir);
+                const dir = fs.path.dirname(app_name_wtf8).?;
+                break :x try unicode.wtf8ToWtf16LeAllocZ(self.allocator, dir);
             } else if (self.cwd) |cwd| {
                 cwd_path_w_needs_free = true;
-                break :x try unicode.utf8ToUtf16LeWithNull(self.allocator, cwd);
+                break :x try unicode.wtf8ToWtf16LeAllocZ(self.allocator, cwd);
             } else {
                 break :x &[_:0]u16{}; // empty for cwd
             }
@@ -790,25 +798,29 @@ pub const ChildProcess = struct {
         // into the basename and dirname and use the dirname as an addition to the cwd
         // path. This is because NtQueryDirectoryFile cannot accept FileName params with
         // path separators.
-        const app_basename_utf8 = fs.path.basename(app_name_utf8);
+        const app_basename_wtf8 = fs.path.basename(app_name_wtf8);
         // If the app name is absolute, then the cwd will already have the app's dirname in it,
         // so only populate app_dirname if app name is a relative path with > 0 path separators.
-        const maybe_app_dirname_utf8 = if (!app_name_is_absolute) fs.path.dirname(app_name_utf8) else null;
+        const maybe_app_dirname_wtf8 = if (!app_name_is_absolute) fs.path.dirname(app_name_wtf8) else null;
         const app_dirname_w: ?[:0]u16 = x: {
-            if (maybe_app_dirname_utf8) |app_dirname_utf8| {
-                break :x try unicode.utf8ToUtf16LeWithNull(self.allocator, app_dirname_utf8);
+            if (maybe_app_dirname_wtf8) |app_dirname_wtf8| {
+                break :x try unicode.wtf8ToWtf16LeAllocZ(self.allocator, app_dirname_wtf8);
             }
             break :x null;
         };
         defer if (app_dirname_w != null) self.allocator.free(app_dirname_w.?);
 
-        const app_name_w = try unicode.utf8ToUtf16LeWithNull(self.allocator, app_basename_utf8);
+        const app_name_w = try unicode.wtf8ToWtf16LeAllocZ(self.allocator, app_basename_wtf8);
         defer self.allocator.free(app_name_w);
 
-        const cmd_line_w = try unicode.utf8ToUtf16LeWithNull(self.allocator, cmd_line);
+        const cmd_line_w = argvToCommandLineWindows(self.allocator, self.argv) catch |err| switch (err) {
+            // argv[0] contains unsupported characters that will never resolve to a valid exe.
+            error.InvalidArg0 => return error.FileNotFound,
+            else => |e| return e,
+        };
         defer self.allocator.free(cmd_line_w);
 
-        exec: {
+        run: {
             const PATH: [:0]const u16 = std.os.getenvW(unicode.utf8ToUtf16LeStringLiteral("PATH")) orelse &[_:0]u16{};
             const PATHEXT: [:0]const u16 = std.os.getenvW(unicode.utf8ToUtf16LeStringLiteral("PATHEXT")) orelse &[_:0]u16{};
 
@@ -834,7 +846,7 @@ pub const ChildProcess = struct {
             }
 
             windowsCreateProcessPathExt(self.allocator, &dir_buf, &app_buf, PATHEXT, cmd_line_w.ptr, envp_ptr, cwd_w_ptr, &siStartInfo, &piProcInfo) catch |no_path_err| {
-                var original_err = switch (no_path_err) {
+                const original_err = switch (no_path_err) {
                     error.FileNotFound, error.InvalidExe, error.AccessDenied => |e| e,
                     error.UnrecoverableInvalidExe => return error.InvalidExe,
                     else => |e| return e,
@@ -850,7 +862,7 @@ pub const ChildProcess = struct {
                     return original_err;
                 }
 
-                var it = mem.tokenize(u16, PATH, &[_]u16{';'});
+                var it = mem.tokenizeScalar(u16, PATH, ';');
                 while (it.next()) |search_path| {
                     dir_buf.clearRetainingCapacity();
                     try dir_buf.appendSlice(self.allocator, search_path);
@@ -860,7 +872,7 @@ pub const ChildProcess = struct {
                     dir_buf.shrinkRetainingCapacity(normalized_len);
 
                     if (windowsCreateProcessPathExt(self.allocator, &dir_buf, &app_buf, PATHEXT, cmd_line_w.ptr, envp_ptr, cwd_w_ptr, &siStartInfo, &piProcInfo)) {
-                        break :exec;
+                        break :run;
                     } else |err| switch (err) {
                         error.FileNotFound, error.AccessDenied, error.InvalidExe => continue,
                         error.UnrecoverableInvalidExe => return error.InvalidExe,
@@ -953,19 +965,18 @@ fn windowsCreateProcessPathExt(
     // for any directory that doesn't contain any possible matches, instead of having
     // to use a separate look up for each individual filename combination (unappended +
     // each PATHEXT appended). For directories where the wildcard *does* match something,
-    // we only need to do a maximum of <number of supported PATHEXT extensions> more
-    // NtQueryDirectoryFile calls.
+    // we iterate the matches and take note of any that are either the unappended version,
+    // or a version with a supported PATHEXT appended. We then try calling CreateProcessW
+    // with the found versions in the appropriate order.
 
     var dir = dir: {
-        if (fs.path.isAbsoluteWindowsWTF16(dir_buf.items[0..dir_path_len])) {
-            const prefixed_path = try windows.wToPrefixedFileW(dir_buf.items[0..dir_path_len]);
-            break :dir fs.cwd().openDirW(prefixed_path.span().ptr, .{}, true) catch return error.FileNotFound;
-        }
         // needs to be null-terminated
         try dir_buf.append(allocator, 0);
-        defer dir_buf.shrinkRetainingCapacity(dir_buf.items[0..dir_path_len].len);
+        defer dir_buf.shrinkRetainingCapacity(dir_path_len);
         const dir_path_z = dir_buf.items[0 .. dir_buf.items.len - 1 :0];
-        break :dir std.fs.cwd().openDirW(dir_path_z.ptr, .{}, true) catch return error.FileNotFound;
+        const prefixed_path = try windows.wToPrefixedFileW(null, dir_path_z);
+        break :dir fs.cwd().openDirW(prefixed_path.span().ptr, .{ .iterate = true }) catch
+            return error.FileNotFound;
     };
     defer dir.close();
 
@@ -974,11 +985,26 @@ fn windowsCreateProcessPathExt(
     try app_buf.append(allocator, 0);
     const app_name_wildcard = app_buf.items[0 .. app_buf.items.len - 1 :0];
 
-    // Enough for the FILE_DIRECTORY_INFORMATION + (NAME_MAX UTF-16 code units [2 bytes each]).
-    const file_info_buf_size = @sizeOf(windows.FILE_DIRECTORY_INFORMATION) + (windows.NAME_MAX * 2);
-    var file_information_buf: [file_info_buf_size]u8 align(@alignOf(os.windows.FILE_DIRECTORY_INFORMATION)) = undefined;
+    // This 2048 is arbitrary, we just want it to be large enough to get multiple FILE_DIRECTORY_INFORMATION entries
+    // returned per NtQueryDirectoryFile call.
+    var file_information_buf: [2048]u8 align(@alignOf(os.windows.FILE_DIRECTORY_INFORMATION)) = undefined;
+    const file_info_maximum_single_entry_size = @sizeOf(windows.FILE_DIRECTORY_INFORMATION) + (windows.NAME_MAX * 2);
+    if (file_information_buf.len < file_info_maximum_single_entry_size) {
+        @compileError("file_information_buf must be large enough to contain at least one maximum size FILE_DIRECTORY_INFORMATION entry");
+    }
     var io_status: windows.IO_STATUS_BLOCK = undefined;
-    const found_name: ?[]const u16 = found_name: {
+
+    const num_supported_pathext = @typeInfo(CreateProcessSupportedExtension).Enum.fields.len;
+    var pathext_seen = [_]bool{false} ** num_supported_pathext;
+    var any_pathext_seen = false;
+    var unappended_exists = false;
+
+    // Fully iterate the wildcard matches via NtQueryDirectoryFile and take note of all versions
+    // of the app_name we should try to spawn.
+    // Note: This is necessary because the order of the files returned is filesystem-dependent:
+    //       On NTFS, `blah.exe*` will always return `blah.exe` first if it exists.
+    //       On FAT32, it's possible for something like `blah.exe.obj` to be returned first.
+    while (true) {
         const app_name_len_bytes = math.cast(u16, app_name_wildcard.len * 2) orelse return error.NameTooLong;
         var app_name_unicode_string = windows.UNICODE_STRING{
             .Length = app_name_len_bytes,
@@ -994,18 +1020,9 @@ fn windowsCreateProcessPathExt(
             &file_information_buf,
             file_information_buf.len,
             .FileDirectoryInformation,
-            // TODO: It might be better to iterate over all wildcard matches and
-            //       only pick the ones that match an appended PATHEXT instead of only
-            //       using the wildcard as a lookup and then restarting iteration
-            //       on future NtQueryDirectoryFile calls.
-            //
-            //       However, note that this could lead to worse outcomes in the
-            //       case of a very generic command name (e.g. "a"), so it might
-            //       be better to only use the wildcard to determine if it's worth
-            //       checking with PATHEXT (this is the current behavior).
-            windows.TRUE, // single result
+            windows.FALSE, // single result
             &app_name_unicode_string,
-            windows.TRUE, // restart iteration
+            windows.FALSE, // restart iteration
         );
 
         // If we get nothing with the wildcard, then we can just bail out
@@ -1013,25 +1030,36 @@ fn windowsCreateProcessPathExt(
         switch (rc) {
             .SUCCESS => {},
             .NO_SUCH_FILE => return error.FileNotFound,
-            .NO_MORE_FILES => return error.FileNotFound,
+            .NO_MORE_FILES => break,
             .ACCESS_DENIED => return error.AccessDenied,
             else => return windows.unexpectedStatus(rc),
         }
 
-        const dir_info = @ptrCast(*windows.FILE_DIRECTORY_INFORMATION, &file_information_buf);
-        if (dir_info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
-            break :found_name null;
+        // According to the docs, this can only happen if there is not enough room in the
+        // buffer to write at least one complete FILE_DIRECTORY_INFORMATION entry.
+        // Therefore, this condition should not be possible to hit with the buffer size we use.
+        std.debug.assert(io_status.Information != 0);
+
+        var it = windows.FileInformationIterator(windows.FILE_DIRECTORY_INFORMATION){ .buf = &file_information_buf };
+        while (it.next()) |info| {
+            // Skip directories
+            if (info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+            const filename = @as([*]u16, @ptrCast(&info.FileName))[0 .. info.FileNameLength / 2];
+            // Because all results start with the app_name since we're using the wildcard `app_name*`,
+            // if the length is equal to app_name then this is an exact match
+            if (filename.len == app_name_len) {
+                // Note: We can't break early here because it's possible that the unappended version
+                //       fails to spawn, in which case we still want to try the PATHEXT appended versions.
+                unappended_exists = true;
+            } else if (windowsCreateProcessSupportsExtension(filename[app_name_len..])) |pathext_ext| {
+                pathext_seen[@intFromEnum(pathext_ext)] = true;
+                any_pathext_seen = true;
+            }
         }
-        break :found_name @ptrCast([*]u16, &dir_info.FileName)[0 .. dir_info.FileNameLength / 2];
-    };
+    }
 
     const unappended_err = unappended: {
-        // NtQueryDirectoryFile returns results in order by filename, so the first result of
-        // the wildcard call will always be the unappended version if it exists. So, if found_name
-        // is not the unappended version, we can skip straight to trying versions with PATHEXT appended.
-        // TODO: This might depend on the filesystem, though; need to somehow verify that it always
-        //       works this way.
-        if (found_name != null and windows.eqlIgnoreCaseWTF16(found_name.?, app_buf.items[0..app_name_len])) {
+        if (unappended_exists) {
             if (dir_path_len != 0) switch (dir_buf.items[dir_buf.items.len - 1]) {
                 '/', '\\' => {},
                 else => try dir_buf.append(allocator, fs.path.sep),
@@ -1064,52 +1092,13 @@ fn windowsCreateProcessPathExt(
         break :unappended error.FileNotFound;
     };
 
-    // Now we know that at least *a* file matching the wildcard exists, we can loop
-    // through PATHEXT in order and exec any that exist
+    if (!any_pathext_seen) return unappended_err;
 
-    var ext_it = mem.tokenize(u16, pathext, &[_]u16{';'});
+    // Now try any PATHEXT appended versions that we've seen
+    var ext_it = mem.tokenizeScalar(u16, pathext, ';');
     while (ext_it.next()) |ext| {
-        if (!windowsCreateProcessSupportsExtension(ext)) continue;
-
-        app_buf.shrinkRetainingCapacity(app_name_len);
-        try app_buf.appendSlice(allocator, ext);
-        try app_buf.append(allocator, 0);
-        const app_name_appended = app_buf.items[0 .. app_buf.items.len - 1 :0];
-
-        const app_name_len_bytes = math.cast(u16, app_name_appended.len * 2) orelse return error.NameTooLong;
-        var app_name_unicode_string = windows.UNICODE_STRING{
-            .Length = app_name_len_bytes,
-            .MaximumLength = app_name_len_bytes,
-            .Buffer = @constCast(app_name_appended.ptr),
-        };
-
-        // Re-use the directory handle but this time we call with the appended app name
-        // with no wildcard.
-        const rc = windows.ntdll.NtQueryDirectoryFile(
-            dir.fd,
-            null,
-            null,
-            null,
-            &io_status,
-            &file_information_buf,
-            file_information_buf.len,
-            .FileDirectoryInformation,
-            windows.TRUE, // single result
-            &app_name_unicode_string,
-            windows.TRUE, // restart iteration
-        );
-
-        switch (rc) {
-            .SUCCESS => {},
-            .NO_SUCH_FILE => continue,
-            .NO_MORE_FILES => continue,
-            .ACCESS_DENIED => continue,
-            else => return windows.unexpectedStatus(rc),
-        }
-
-        const dir_info = @ptrCast(*windows.FILE_DIRECTORY_INFORMATION, &file_information_buf);
-        // Skip directories
-        if (dir_info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+        const ext_enum = windowsCreateProcessSupportsExtension(ext) orelse continue;
+        if (!pathext_seen[@intFromEnum(ext_enum)]) continue;
 
         dir_buf.shrinkRetainingCapacity(dir_path_len);
         if (dir_path_len != 0) switch (dir_buf.items[dir_buf.items.len - 1]) {
@@ -1167,16 +1156,24 @@ fn windowsCreateProcess(app_name: [*:0]u16, cmd_line: [*:0]u16, envp_ptr: ?[*]u1
         null,
         windows.TRUE,
         windows.CREATE_UNICODE_ENVIRONMENT,
-        @ptrCast(?*anyopaque, envp_ptr),
+        @as(?*anyopaque, @ptrCast(envp_ptr)),
         cwd_ptr,
         lpStartupInfo,
         lpProcessInformation,
     );
 }
 
-/// Case-insenstive UTF-16 lookup
-fn windowsCreateProcessSupportsExtension(ext: []const u16) bool {
-    if (ext.len != 4) return false;
+// Should be kept in sync with `windowsCreateProcessSupportsExtension`
+const CreateProcessSupportedExtension = enum {
+    bat,
+    cmd,
+    com,
+    exe,
+};
+
+/// Case-insensitive WTF-16 lookup
+fn windowsCreateProcessSupportsExtension(ext: []const u16) ?CreateProcessSupportedExtension {
+    if (ext.len != 4) return null;
     const State = enum {
         start,
         dot,
@@ -1192,85 +1189,205 @@ fn windowsCreateProcessSupportsExtension(ext: []const u16) bool {
     for (ext) |c| switch (state) {
         .start => switch (c) {
             '.' => state = .dot,
-            else => return false,
+            else => return null,
         },
         .dot => switch (c) {
             'b', 'B' => state = .b,
             'c', 'C' => state = .c,
             'e', 'E' => state = .e,
-            else => return false,
+            else => return null,
         },
         .b => switch (c) {
             'a', 'A' => state = .ba,
-            else => return false,
+            else => return null,
         },
         .c => switch (c) {
             'm', 'M' => state = .cm,
             'o', 'O' => state = .co,
-            else => return false,
+            else => return null,
         },
         .e => switch (c) {
             'x', 'X' => state = .ex,
-            else => return false,
+            else => return null,
         },
         .ba => switch (c) {
-            't', 'T' => return true, // .BAT
-            else => return false,
+            't', 'T' => return .bat,
+            else => return null,
         },
         .cm => switch (c) {
-            'd', 'D' => return true, // .CMD
-            else => return false,
+            'd', 'D' => return .cmd,
+            else => return null,
         },
         .co => switch (c) {
-            'm', 'M' => return true, // .COM
-            else => return false,
+            'm', 'M' => return .com,
+            else => return null,
         },
         .ex => switch (c) {
-            'e', 'E' => return true, // .EXE
-            else => return false,
+            'e', 'E' => return .exe,
+            else => return null,
         },
     };
-    return false;
+    return null;
 }
 
 test "windowsCreateProcessSupportsExtension" {
-    try std.testing.expect(windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e' }));
-    try std.testing.expect(!windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e', 'c' }));
+    try std.testing.expectEqual(CreateProcessSupportedExtension.exe, windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e' }).?);
+    try std.testing.expect(windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e', 'c' }) == null);
 }
 
-/// Caller must dealloc.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+pub const ArgvToCommandLineError = error{ OutOfMemory, InvalidWtf8, InvalidArg0 };
+
+/// Serializes `argv` to a Windows command-line string suitable for passing to a child process and
+/// parsing by the `CommandLineToArgvW` algorithm. The caller owns the returned slice.
+pub fn argvToCommandLineWindows(
+    allocator: mem.Allocator,
+    argv: []const []const u8,
+) ArgvToCommandLineError![:0]u16 {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
-    for (argv, 0..) |arg, arg_i| {
-        if (arg_i != 0) try buf.append(' ');
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
-            try buf.appendSlice(arg);
-            continue;
-        }
-        try buf.append('"');
-        var backslash_count: usize = 0;
-        for (arg) |byte| {
-            switch (byte) {
-                '\\' => backslash_count += 1,
-                '"' => {
-                    try buf.appendNTimes('\\', backslash_count * 2 + 1);
-                    try buf.append('"');
-                    backslash_count = 0;
-                },
-                else => {
-                    try buf.appendNTimes('\\', backslash_count);
-                    try buf.append(byte);
-                    backslash_count = 0;
-                },
+    if (argv.len != 0) {
+        const arg0 = argv[0];
+
+        // The first argument must be quoted if it contains spaces or ASCII control characters
+        // (excluding DEL). It also follows special quoting rules where backslashes have no special
+        // interpretation, which makes it impossible to pass certain first arguments containing
+        // double quotes to a child process without characters from the first argument leaking into
+        // subsequent ones (which could have security implications).
+        //
+        // Empty arguments technically don't need quotes, but we quote them anyway for maximum
+        // compatibility with different implementations of the 'CommandLineToArgvW' algorithm.
+        //
+        // Double quotes are illegal in paths on Windows, so for the sake of simplicity we reject
+        // all first arguments containing double quotes, even ones that we could theoretically
+        // serialize in unquoted form.
+        var needs_quotes = arg0.len == 0;
+        for (arg0) |c| {
+            if (c <= ' ') {
+                needs_quotes = true;
+            } else if (c == '"') {
+                return error.InvalidArg0;
             }
         }
-        try buf.appendNTimes('\\', backslash_count * 2);
-        try buf.append('"');
+        if (needs_quotes) {
+            try buf.append('"');
+            try buf.appendSlice(arg0);
+            try buf.append('"');
+        } else {
+            try buf.appendSlice(arg0);
+        }
+
+        for (argv[1..]) |arg| {
+            try buf.append(' ');
+
+            // Subsequent arguments must be quoted if they contain spaces, tabs or double quotes,
+            // or if they are empty. For simplicity and for maximum compatibility with different
+            // implementations of the 'CommandLineToArgvW' algorithm, we also quote all ASCII
+            // control characters (again, excluding DEL).
+            needs_quotes = for (arg) |c| {
+                if (c <= ' ' or c == '"') {
+                    break true;
+                }
+            } else arg.len == 0;
+            if (!needs_quotes) {
+                try buf.appendSlice(arg);
+                continue;
+            }
+
+            try buf.append('"');
+            var backslash_count: usize = 0;
+            for (arg) |byte| {
+                switch (byte) {
+                    '\\' => {
+                        backslash_count += 1;
+                    },
+                    '"' => {
+                        try buf.appendNTimes('\\', backslash_count * 2 + 1);
+                        try buf.append('"');
+                        backslash_count = 0;
+                    },
+                    else => {
+                        try buf.appendNTimes('\\', backslash_count);
+                        try buf.append(byte);
+                        backslash_count = 0;
+                    },
+                }
+            }
+            try buf.appendNTimes('\\', backslash_count * 2);
+            try buf.append('"');
+        }
     }
 
-    return buf.toOwnedSliceSentinel(0);
+    return try unicode.wtf8ToWtf16LeAllocZ(allocator, buf.items);
+}
+
+test "argvToCommandLineWindows" {
+    const t = testArgvToCommandLineWindows;
+
+    try t(&.{
+        \\C:\Program Files\zig\zig.exe
+        ,
+        \\run
+        ,
+        \\.\src\main.zig
+        ,
+        \\-target
+        ,
+        \\x86_64-windows-gnu
+        ,
+        \\-O
+        ,
+        \\ReleaseSafe
+        ,
+        \\--
+        ,
+        \\--emoji=🗿
+        ,
+        \\--eval=new Regex("Dwayne \"The Rock\" Johnson")
+        ,
+    },
+        \\"C:\Program Files\zig\zig.exe" run .\src\main.zig -target x86_64-windows-gnu -O ReleaseSafe -- --emoji=🗿 "--eval=new Regex(\"Dwayne \\\"The Rock\\\" Johnson\")"
+    );
+
+    try t(&.{}, "");
+    try t(&.{""}, "\"\"");
+    try t(&.{" "}, "\" \"");
+    try t(&.{"\t"}, "\"\t\"");
+    try t(&.{"\x07"}, "\"\x07\"");
+    try t(&.{"🦎"}, "🦎");
+
+    try t(
+        &.{ "zig", "aa aa", "bb\tbb", "cc\ncc", "dd\r\ndd", "ee\x7Fee" },
+        "zig \"aa aa\" \"bb\tbb\" \"cc\ncc\" \"dd\r\ndd\" ee\x7Fee",
+    );
+
+    try t(
+        &.{ "\\\\foo bar\\foo bar\\", "\\\\zig zag\\zig zag\\" },
+        "\"\\\\foo bar\\foo bar\\\" \"\\\\zig zag\\zig zag\\\\\"",
+    );
+
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"\"quotes\"quotes\""}),
+    );
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"quotes\"quotes"}),
+    );
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"q u o t e s \" q u o t e s"}),
+    );
+}
+
+fn testArgvToCommandLineWindows(argv: []const []const u8, expected_cmd_line: []const u8) !void {
+    const cmd_line_w = try argvToCommandLineWindows(std.testing.allocator, argv);
+    defer std.testing.allocator.free(cmd_line_w);
+
+    const cmd_line = try unicode.wtf16LeToWtf8Alloc(std.testing.allocator, cmd_line_w);
+    defer std.testing.allocator.free(cmd_line);
+
+    try std.testing.expectEqualStrings(expected_cmd_line, cmd_line);
 }
 
 fn windowsDestroyPipe(rd: ?windows.HANDLE, wr: ?windows.HANDLE) void {
@@ -1288,7 +1405,7 @@ fn windowsMakePipeIn(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *const w
     wr.* = wr_h;
 }
 
-var pipe_name_counter = std.atomic.Atomic(u32).init(1);
+var pipe_name_counter = std.atomic.Value(u32).init(1);
 
 fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *const windows.SECURITY_ATTRIBUTES) !void {
     var tmp_bufw: [128]u16 = undefined;
@@ -1305,7 +1422,7 @@ fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *cons
             "\\\\.\\pipe\\zig-childprocess-{d}-{d}",
             .{ windows.kernel32.GetCurrentProcessId(), pipe_name_counter.fetchAdd(1, .Monotonic) },
         ) catch unreachable;
-        const len = std.unicode.utf8ToUtf16Le(&tmp_bufw, pipe_path) catch unreachable;
+        const len = std.unicode.wtf8ToWtf16Le(&tmp_bufw, pipe_path) catch unreachable;
         tmp_bufw[len] = 0;
         break :blk tmp_bufw[0..len :0];
     };
@@ -1359,7 +1476,7 @@ fn destroyPipe(pipe: [2]os.fd_t) void {
 // Child of fork calls this to report an error to the fork parent.
 // Then the child exits.
 fn forkChildErrReport(fd: i32, err: ChildProcess.SpawnError) noreturn {
-    writeIntFd(fd, @as(ErrInt, @errorToInt(err))) catch {};
+    writeIntFd(fd, @as(ErrInt, @intFromError(err))) catch {};
     // If we're linking libc, some naughty applications may have registered atexit handlers
     // which we really do not want to run in the fork child. I caught LLVM doing this and
     // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
@@ -1374,21 +1491,13 @@ fn forkChildErrReport(fd: i32, err: ChildProcess.SpawnError) noreturn {
 const ErrInt = std.meta.Int(.unsigned, @sizeOf(anyerror) * 8);
 
 fn writeIntFd(fd: i32, value: ErrInt) !void {
-    const file = File{
-        .handle = fd,
-        .capable_io_mode = .blocking,
-        .intended_io_mode = .blocking,
-    };
-    file.writer().writeIntNative(u64, @intCast(u64, value)) catch return error.SystemResources;
+    const file = File{ .handle = fd };
+    file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
 }
 
 fn readIntFd(fd: i32) !ErrInt {
-    const file = File{
-        .handle = fd,
-        .capable_io_mode = .blocking,
-        .intended_io_mode = .blocking,
-    };
-    return @intCast(ErrInt, file.reader().readIntNative(u64) catch return error.SystemResources);
+    const file = File{ .handle = fd };
+    return @as(ErrInt, @intCast(file.reader().readInt(u64, .little) catch return error.SystemResources));
 }
 
 /// Caller must free result.
@@ -1410,10 +1519,10 @@ pub fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) !
     var it = env_map.iterator();
     var i: usize = 0;
     while (it.next()) |pair| {
-        i += try unicode.utf8ToUtf16Le(result[i..], pair.key_ptr.*);
+        i += try unicode.wtf8ToWtf16Le(result[i..], pair.key_ptr.*);
         result[i] = '=';
         i += 1;
-        i += try unicode.utf8ToUtf16Le(result[i..], pair.value_ptr.*);
+        i += try unicode.wtf8ToWtf16Le(result[i..], pair.value_ptr.*);
         result[i] = 0;
         i += 1;
     }
@@ -1436,9 +1545,9 @@ pub fn createNullDelimitedEnvMap(arena: mem.Allocator, env_map: *const EnvMap) !
         var i: usize = 0;
         while (it.next()) |pair| : (i += 1) {
             const env_buf = try arena.allocSentinel(u8, pair.key_ptr.len + pair.value_ptr.len + 1, 0);
-            mem.copy(u8, env_buf, pair.key_ptr.*);
+            @memcpy(env_buf[0..pair.key_ptr.len], pair.key_ptr.*);
             env_buf[pair.key_ptr.len] = '=';
-            mem.copy(u8, env_buf[pair.key_ptr.len + 1 ..], pair.value_ptr.*);
+            @memcpy(env_buf[pair.key_ptr.len + 1 ..][0..pair.value_ptr.len], pair.value_ptr.*);
             envp_buf[i] = env_buf.ptr;
         }
         assert(i == envp_count);

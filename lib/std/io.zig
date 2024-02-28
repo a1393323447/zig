@@ -10,22 +10,7 @@ const fs = std.fs;
 const mem = std.mem;
 const meta = std.meta;
 const File = std.fs.File;
-
-pub const Mode = enum {
-    /// I/O operates normally, waiting for the operating system syscalls to complete.
-    blocking,
-
-    /// I/O functions are generated async and rely on a global event loop. Event-based I/O.
-    evented,
-};
-
-const mode = std.options.io_mode;
-pub const is_async = mode != .blocking;
-
-/// This is an enum value to use for I/O mode at runtime, since it takes up zero bytes at runtime,
-/// and makes expressions comptime-known when `is_async` is `false`.
-pub const ModeOverride = if (is_async) Mode else enum { blocking };
-pub const default_mode: ModeOverride = if (is_async) Mode.evented else .blocking;
+const Allocator = std.mem.Allocator;
 
 fn getStdOutHandle() os.fd_t {
     if (builtin.os.tag == .windows) {
@@ -43,14 +28,8 @@ fn getStdOutHandle() os.fd_t {
     return os.STDOUT_FILENO;
 }
 
-/// TODO: async stdout on windows without a dedicated thread.
-/// https://github.com/ziglang/zig/pull/4816#issuecomment-604521023
 pub fn getStdOut() File {
-    return File{
-        .handle = getStdOutHandle(),
-        .capable_io_mode = .blocking,
-        .intended_io_mode = default_mode,
-    };
+    return File{ .handle = getStdOutHandle() };
 }
 
 fn getStdErrHandle() os.fd_t {
@@ -69,14 +48,8 @@ fn getStdErrHandle() os.fd_t {
     return os.STDERR_FILENO;
 }
 
-/// This returns a `File` that is configured to block with every write, in order
-/// to facilitate better debugging. This can be changed by modifying the `intended_io_mode` field.
 pub fn getStdErr() File {
-    return File{
-        .handle = getStdErrHandle(),
-        .capable_io_mode = .blocking,
-        .intended_io_mode = .blocking,
-    };
+    return File{ .handle = getStdErrHandle() };
 }
 
 fn getStdInHandle() os.fd_t {
@@ -95,18 +68,304 @@ fn getStdInHandle() os.fd_t {
     return os.STDIN_FILENO;
 }
 
-/// TODO: async stdin on windows without a dedicated thread.
-/// https://github.com/ziglang/zig/pull/4816#issuecomment-604521023
 pub fn getStdIn() File {
-    return File{
-        .handle = getStdInHandle(),
-        .capable_io_mode = .blocking,
-        .intended_io_mode = default_mode,
+    return File{ .handle = getStdInHandle() };
+}
+
+pub fn GenericReader(
+    comptime Context: type,
+    comptime ReadError: type,
+    /// Returns the number of bytes read. It may be less than buffer.len.
+    /// If the number of bytes read is 0, it means end of stream.
+    /// End of stream is not an error condition.
+    comptime readFn: fn (context: Context, buffer: []u8) ReadError!usize,
+) type {
+    return struct {
+        context: Context,
+
+        pub const Error = ReadError;
+        pub const NoEofError = ReadError || error{
+            EndOfStream,
+        };
+
+        pub inline fn read(self: Self, buffer: []u8) Error!usize {
+            return readFn(self.context, buffer);
+        }
+
+        pub inline fn readAll(self: Self, buffer: []u8) Error!usize {
+            return @errorCast(self.any().readAll(buffer));
+        }
+
+        pub inline fn readAtLeast(self: Self, buffer: []u8, len: usize) Error!usize {
+            return @errorCast(self.any().readAtLeast(buffer, len));
+        }
+
+        pub inline fn readNoEof(self: Self, buf: []u8) NoEofError!void {
+            return @errorCast(self.any().readNoEof(buf));
+        }
+
+        pub inline fn readAllArrayList(
+            self: Self,
+            array_list: *std.ArrayList(u8),
+            max_append_size: usize,
+        ) (error{StreamTooLong} || Allocator.Error || Error)!void {
+            return @errorCast(self.any().readAllArrayList(array_list, max_append_size));
+        }
+
+        pub inline fn readAllArrayListAligned(
+            self: Self,
+            comptime alignment: ?u29,
+            array_list: *std.ArrayListAligned(u8, alignment),
+            max_append_size: usize,
+        ) (error{StreamTooLong} || Allocator.Error || Error)!void {
+            return @errorCast(self.any().readAllArrayListAligned(
+                alignment,
+                array_list,
+                max_append_size,
+            ));
+        }
+
+        pub inline fn readAllAlloc(
+            self: Self,
+            allocator: Allocator,
+            max_size: usize,
+        ) (Error || Allocator.Error || error{StreamTooLong})![]u8 {
+            return @errorCast(self.any().readAllAlloc(allocator, max_size));
+        }
+
+        pub inline fn readUntilDelimiterArrayList(
+            self: Self,
+            array_list: *std.ArrayList(u8),
+            delimiter: u8,
+            max_size: usize,
+        ) (NoEofError || Allocator.Error || error{StreamTooLong})!void {
+            return @errorCast(self.any().readUntilDelimiterArrayList(
+                array_list,
+                delimiter,
+                max_size,
+            ));
+        }
+
+        pub inline fn readUntilDelimiterAlloc(
+            self: Self,
+            allocator: Allocator,
+            delimiter: u8,
+            max_size: usize,
+        ) (NoEofError || Allocator.Error || error{StreamTooLong})![]u8 {
+            return @errorCast(self.any().readUntilDelimiterAlloc(
+                allocator,
+                delimiter,
+                max_size,
+            ));
+        }
+
+        pub inline fn readUntilDelimiter(
+            self: Self,
+            buf: []u8,
+            delimiter: u8,
+        ) (NoEofError || error{StreamTooLong})![]u8 {
+            return @errorCast(self.any().readUntilDelimiter(buf, delimiter));
+        }
+
+        pub inline fn readUntilDelimiterOrEofAlloc(
+            self: Self,
+            allocator: Allocator,
+            delimiter: u8,
+            max_size: usize,
+        ) (Error || Allocator.Error || error{StreamTooLong})!?[]u8 {
+            return @errorCast(self.any().readUntilDelimiterOrEofAlloc(
+                allocator,
+                delimiter,
+                max_size,
+            ));
+        }
+
+        pub inline fn readUntilDelimiterOrEof(
+            self: Self,
+            buf: []u8,
+            delimiter: u8,
+        ) (Error || error{StreamTooLong})!?[]u8 {
+            return @errorCast(self.any().readUntilDelimiterOrEof(buf, delimiter));
+        }
+
+        pub inline fn streamUntilDelimiter(
+            self: Self,
+            writer: anytype,
+            delimiter: u8,
+            optional_max_size: ?usize,
+        ) (NoEofError || error{StreamTooLong} || @TypeOf(writer).Error)!void {
+            return @errorCast(self.any().streamUntilDelimiter(
+                writer,
+                delimiter,
+                optional_max_size,
+            ));
+        }
+
+        pub inline fn skipUntilDelimiterOrEof(self: Self, delimiter: u8) Error!void {
+            return @errorCast(self.any().skipUntilDelimiterOrEof(delimiter));
+        }
+
+        pub inline fn readByte(self: Self) NoEofError!u8 {
+            return @errorCast(self.any().readByte());
+        }
+
+        pub inline fn readByteSigned(self: Self) NoEofError!i8 {
+            return @errorCast(self.any().readByteSigned());
+        }
+
+        pub inline fn readBytesNoEof(
+            self: Self,
+            comptime num_bytes: usize,
+        ) NoEofError![num_bytes]u8 {
+            return @errorCast(self.any().readBytesNoEof(num_bytes));
+        }
+
+        pub inline fn readIntoBoundedBytes(
+            self: Self,
+            comptime num_bytes: usize,
+            bounded: *std.BoundedArray(u8, num_bytes),
+        ) Error!void {
+            return @errorCast(self.any().readIntoBoundedBytes(num_bytes, bounded));
+        }
+
+        pub inline fn readBoundedBytes(
+            self: Self,
+            comptime num_bytes: usize,
+        ) Error!std.BoundedArray(u8, num_bytes) {
+            return @errorCast(self.any().readBoundedBytes(num_bytes));
+        }
+
+        pub inline fn readInt(self: Self, comptime T: type, endian: std.builtin.Endian) NoEofError!T {
+            return @errorCast(self.any().readInt(T, endian));
+        }
+
+        pub inline fn readVarInt(
+            self: Self,
+            comptime ReturnType: type,
+            endian: std.builtin.Endian,
+            size: usize,
+        ) NoEofError!ReturnType {
+            return @errorCast(self.any().readVarInt(ReturnType, endian, size));
+        }
+
+        pub const SkipBytesOptions = AnyReader.SkipBytesOptions;
+
+        pub inline fn skipBytes(
+            self: Self,
+            num_bytes: u64,
+            comptime options: SkipBytesOptions,
+        ) NoEofError!void {
+            return @errorCast(self.any().skipBytes(num_bytes, options));
+        }
+
+        pub inline fn isBytes(self: Self, slice: []const u8) NoEofError!bool {
+            return @errorCast(self.any().isBytes(slice));
+        }
+
+        pub inline fn readStruct(self: Self, comptime T: type) NoEofError!T {
+            return @errorCast(self.any().readStruct(T));
+        }
+
+        pub inline fn readStructEndian(self: Self, comptime T: type, endian: std.builtin.Endian) NoEofError!T {
+            return @errorCast(self.any().readStructEndian(T, endian));
+        }
+
+        pub const ReadEnumError = NoEofError || error{
+            /// An integer was read, but it did not match any of the tags in the supplied enum.
+            InvalidValue,
+        };
+
+        pub inline fn readEnum(
+            self: Self,
+            comptime Enum: type,
+            endian: std.builtin.Endian,
+        ) ReadEnumError!Enum {
+            return @errorCast(self.any().readEnum(Enum, endian));
+        }
+
+        pub inline fn any(self: *const Self) AnyReader {
+            return .{
+                .context = @ptrCast(&self.context),
+                .readFn = typeErasedReadFn,
+            };
+        }
+
+        const Self = @This();
+
+        fn typeErasedReadFn(context: *const anyopaque, buffer: []u8) anyerror!usize {
+            const ptr: *const Context = @alignCast(@ptrCast(context));
+            return readFn(ptr.*, buffer);
+        }
     };
 }
 
-pub const Reader = @import("io/reader.zig").Reader;
-pub const Writer = @import("io/writer.zig").Writer;
+pub fn GenericWriter(
+    comptime Context: type,
+    comptime WriteError: type,
+    comptime writeFn: fn (context: Context, bytes: []const u8) WriteError!usize,
+) type {
+    return struct {
+        context: Context,
+
+        const Self = @This();
+        pub const Error = WriteError;
+
+        pub inline fn write(self: Self, bytes: []const u8) Error!usize {
+            return writeFn(self.context, bytes);
+        }
+
+        pub inline fn writeAll(self: Self, bytes: []const u8) Error!void {
+            return @errorCast(self.any().writeAll(bytes));
+        }
+
+        pub inline fn print(self: Self, comptime format: []const u8, args: anytype) Error!void {
+            return @errorCast(self.any().print(format, args));
+        }
+
+        pub inline fn writeByte(self: Self, byte: u8) Error!void {
+            return @errorCast(self.any().writeByte(byte));
+        }
+
+        pub inline fn writeByteNTimes(self: Self, byte: u8, n: usize) Error!void {
+            return @errorCast(self.any().writeByteNTimes(byte, n));
+        }
+
+        pub inline fn writeBytesNTimes(self: Self, bytes: []const u8, n: usize) Error!void {
+            return @errorCast(self.any().writeBytesNTimes(bytes, n));
+        }
+
+        pub inline fn writeInt(self: Self, comptime T: type, value: T, endian: std.builtin.Endian) Error!void {
+            return @errorCast(self.any().writeInt(T, value, endian));
+        }
+
+        pub inline fn writeStruct(self: Self, value: anytype) Error!void {
+            return @errorCast(self.any().writeStruct(value));
+        }
+
+        pub inline fn any(self: *const Self) AnyWriter {
+            return .{
+                .context = @ptrCast(&self.context),
+                .writeFn = typeErasedWriteFn,
+            };
+        }
+
+        fn typeErasedWriteFn(context: *const anyopaque, bytes: []const u8) anyerror!usize {
+            const ptr: *const Context = @alignCast(@ptrCast(context));
+            return writeFn(ptr.*, bytes);
+        }
+    };
+}
+
+/// Deprecated; consider switching to `AnyReader` or use `GenericReader`
+/// to use previous API.
+pub const Reader = GenericReader;
+/// Deprecated; consider switching to `AnyWriter` or use `GenericWriter`
+/// to use previous API.
+pub const Writer = GenericWriter;
+
+pub const AnyReader = @import("io/Reader.zig");
+pub const AnyWriter = @import("io/Writer.zig");
+
 pub const SeekableStream = @import("io/seekable_stream.zig").SeekableStream;
 
 pub const BufferedWriter = @import("io/buffered_writer.zig").BufferedWriter;
@@ -148,12 +407,14 @@ pub const changeDetectionStream = @import("io/change_detection_stream.zig").chan
 pub const FindByteWriter = @import("io/find_byte_writer.zig").FindByteWriter;
 pub const findByteWriter = @import("io/find_byte_writer.zig").findByteWriter;
 
-pub const FindByteOutStream = @compileError("deprecated; use `FindByteWriter`");
-pub const findByteOutStream = @compileError("deprecated; use `findByteWriter`");
-
 pub const BufferedAtomicFile = @import("io/buffered_atomic_file.zig").BufferedAtomicFile;
 
 pub const StreamSource = @import("io/stream_source.zig").StreamSource;
+
+pub const BufferedTee = @import("io/buffered_tee.zig").BufferedTee;
+pub const bufferedTee = @import("io/buffered_tee.zig").bufferedTee;
+
+pub const tty = @import("io/tty.zig");
 
 /// A Writer that doesn't write to anything.
 pub const null_writer = @as(NullWriter, .{ .context = {} });
@@ -169,7 +430,7 @@ test "null_writer" {
 }
 
 pub fn poll(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     comptime StreamEnum: type,
     files: PollFiles(StreamEnum),
 ) Poller(StreamEnum) {
@@ -251,17 +512,25 @@ pub fn Poller(comptime StreamEnum: type) type {
 
         pub fn poll(self: *Self) !bool {
             if (builtin.os.tag == .windows) {
-                return pollWindows(self);
+                return pollWindows(self, null);
             } else {
-                return pollPosix(self);
+                return pollPosix(self, null);
+            }
+        }
+
+        pub fn pollTimeout(self: *Self, nanoseconds: u64) !bool {
+            if (builtin.os.tag == .windows) {
+                return pollWindows(self, nanoseconds);
+            } else {
+                return pollPosix(self, nanoseconds);
             }
         }
 
         pub inline fn fifo(self: *Self, comptime which: StreamEnum) *PollFifo {
-            return &self.fifos[@enumToInt(which)];
+            return &self.fifos[@intFromEnum(which)];
         }
 
-        fn pollWindows(self: *Self) !bool {
+        fn pollWindows(self: *Self, nanoseconds: ?u64) !bool {
             const bump_amt = 512;
 
             if (!self.windows.first_read_done) {
@@ -276,7 +545,7 @@ pub fn Poller(comptime StreamEnum: type) type {
                     )) {
                         .pending => {
                             self.windows.active.handles_buf[self.windows.active.count] = handle;
-                            self.windows.active.stream_map[self.windows.active.count] = @intToEnum(StreamEnum, i);
+                            self.windows.active.stream_map[self.windows.active.count] = @as(StreamEnum, @enumFromInt(i));
                             self.windows.active.count += 1;
                         },
                         .closed => {}, // don't add to the wait_objects list
@@ -292,10 +561,15 @@ pub fn Poller(comptime StreamEnum: type) type {
                     self.windows.active.count,
                     &self.windows.active.handles_buf,
                     0,
-                    os.windows.INFINITE,
+                    if (nanoseconds) |ns|
+                        @min(std.math.cast(u32, ns / std.time.ns_per_ms) orelse (os.windows.INFINITE - 1), os.windows.INFINITE - 1)
+                    else
+                        os.windows.INFINITE,
                 );
                 if (status == os.windows.WAIT_FAILED)
                     return os.windows.unexpectedError(os.windows.kernel32.GetLastError());
+                if (status == os.windows.WAIT_TIMEOUT)
+                    return true;
 
                 if (status < os.windows.WAIT_OBJECT_0 or status > os.windows.WAIT_OBJECT_0 + enum_fields.len - 1)
                     unreachable;
@@ -303,7 +577,7 @@ pub fn Poller(comptime StreamEnum: type) type {
                 const active_idx = status - os.windows.WAIT_OBJECT_0;
 
                 const handle = self.windows.active.handles_buf[active_idx];
-                const stream_idx = @enumToInt(self.windows.active.stream_map[active_idx]);
+                const stream_idx = @intFromEnum(self.windows.active.stream_map[active_idx]);
                 var read_bytes: u32 = undefined;
                 if (0 == os.windows.kernel32.GetOverlappedResult(
                     handle,
@@ -333,7 +607,7 @@ pub fn Poller(comptime StreamEnum: type) type {
             }
         }
 
-        fn pollPosix(self: *Self) !bool {
+        fn pollPosix(self: *Self, nanoseconds: ?u64) !bool {
             // We ask for ensureUnusedCapacity with this much extra space. This
             // has more of an effect on small reads because once the reads
             // start to get larger the amount of space an ArrayList will
@@ -342,7 +616,10 @@ pub fn Poller(comptime StreamEnum: type) type {
 
             const err_mask = os.POLL.ERR | os.POLL.NVAL | os.POLL.HUP;
 
-            const events_len = try os.poll(&self.poll_fds, std.math.maxInt(i32));
+            const events_len = try os.poll(&self.poll_fds, if (nanoseconds) |ns|
+                std.math.cast(i32, ns / std.time.ns_per_ms) orelse std.math.maxInt(i32)
+            else
+                -1);
             if (events_len == 0) {
                 for (self.poll_fds) |poll_fd| {
                     if (poll_fd.fd != -1) return true;
@@ -403,7 +680,7 @@ pub fn PollFiles(comptime StreamEnum: type) type {
     var struct_fields: [enum_fields.len]std.builtin.Type.StructField = undefined;
     for (&struct_fields, enum_fields) |*struct_field, enum_field| {
         struct_field.* = .{
-            .name = enum_field.name,
+            .name = enum_field.name ++ "",
             .type = fs.File,
             .default_value = null,
             .is_comptime = false,
@@ -419,6 +696,8 @@ pub fn PollFiles(comptime StreamEnum: type) type {
 }
 
 test {
+    _ = AnyReader;
+    _ = AnyWriter;
     _ = @import("io/bit_reader.zig");
     _ = @import("io/bit_writer.zig");
     _ = @import("io/buffered_atomic_file.zig");
@@ -428,10 +707,9 @@ test {
     _ = @import("io/counting_writer.zig");
     _ = @import("io/counting_reader.zig");
     _ = @import("io/fixed_buffer_stream.zig");
-    _ = @import("io/reader.zig");
-    _ = @import("io/writer.zig");
     _ = @import("io/peek_stream.zig");
     _ = @import("io/seekable_stream.zig");
     _ = @import("io/stream_source.zig");
     _ = @import("io/test.zig");
+    _ = @import("io/buffered_tee.zig");
 }

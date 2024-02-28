@@ -16,6 +16,7 @@ const FeatureOverride = struct {
     flatten: bool = false,
     zig_name: ?[]const u8 = null,
     desc: ?[]const u8 = null,
+    omit_deps: []const []const u8 = &.{},
     extra_deps: []const []const u8 = &.{},
 };
 
@@ -40,6 +41,7 @@ const LlvmTarget = struct {
     feature_overrides: []const FeatureOverride = &.{},
     extra_cpus: []const Cpu = &.{},
     extra_features: []const Feature = &.{},
+    omit_cpus: []const []const u8 = &.{},
     branch_quota: ?usize = null,
 };
 
@@ -376,6 +378,31 @@ const llvm_targets = [_]LlvmTarget{
             .{
                 .llvm_name = "cortex-a710",
                 .flatten = true,
+            },
+            .{
+                .llvm_name = "cortex-m4",
+                .omit_deps = &.{"vfp4d16sp"},
+            },
+            .{
+                .llvm_name = "cortex-m7",
+                .omit_deps = &.{"fp_armv8d16"},
+            },
+            .{
+                .llvm_name = "cortex-m33",
+                .omit_deps = &.{ "fp_armv8d16sp", "dsp" },
+            },
+            .{
+                .llvm_name = "cortex-m35p",
+                .omit_deps = &.{ "fp_armv8d16sp", "dsp" },
+            },
+            .{
+                .llvm_name = "cortex-m55",
+                .omit_deps = &.{ "mve_fp", "fp_armv8d16" },
+            },
+            .{
+                .llvm_name = "cortex-m85",
+                .omit_deps = &.{ "mve_fp", "pacbti", "fp_armv8d16" },
+                .extra_deps = &.{"trustzone"},
             },
             .{
                 .llvm_name = "cortex-x1c",
@@ -915,6 +942,39 @@ const llvm_targets = [_]LlvmTarget{
                 .extra_deps = &.{"soft_float"},
             },
         },
+        .omit_cpus = &.{
+            // LLVM defines a bunch of dumb aliases with foreach loops in X86.td.
+            "pentium_mmx",
+            "pentium_pro",
+            "pentium_ii",
+            "pentium_3m",
+            "pentium_iii_no_xmm_regs",
+            "pentium_iii",
+            "pentium_m",
+            "pentium4m",
+            "pentium_4",
+            "pentium_4_sse3",
+            "core_2_duo_ssse3",
+            "core_2_duo_sse4_1",
+            "atom_sse4_2",
+            "goldmont_plus",
+            "core_i7_sse4_2",
+            "core_aes_pclmulqdq",
+            "corei7-avx",
+            "core_2nd_gen_avx",
+            "core-avx-i",
+            "core_3rd_gen_avx",
+            "core-avx2",
+            "core_4th_gen_avx",
+            "core_4th_gen_avx_tsx",
+            "core_5th_gen_avx",
+            "core_5th_gen_avx_tsx",
+            "mic_avx512",
+            "skylake_avx512",
+            "icelake_client",
+            "icelake_server",
+            "graniterapids_d",
+        },
     },
     .{
         .zig_name = "xcore",
@@ -1030,7 +1090,7 @@ fn processOneTarget(job: Job) anyerror!void {
         }),
     };
 
-    const child_result = try std.ChildProcess.exec(.{
+    const child_result = try std.ChildProcess.run(.{
         .allocator = arena,
         .argv = &child_args,
         .max_output_bytes = 400 * 1024 * 1024,
@@ -1054,14 +1114,14 @@ fn processOneTarget(job: Job) anyerror!void {
     var json_parse_progress = progress_node.start("parse JSON", 0);
     json_parse_progress.activate();
 
-    var parser = json.Parser.init(arena, false);
-    const tree = try parser.parse(json_text);
+    const parsed = try json.parseFromSlice(json.Value, arena, json_text, .{});
+    defer parsed.deinit();
+    const root_map = &parsed.value.object;
     json_parse_progress.end();
 
     var render_progress = progress_node.start("render zig code", 0);
     render_progress.activate();
 
-    const root_map = &tree.root.Object;
     var features_table = std.StringHashMap(Feature).init(arena);
     var all_features = std.ArrayList(Feature).init(arena);
     var all_cpus = std.ArrayList(Cpu).init(arena);
@@ -1070,28 +1130,18 @@ fn processOneTarget(job: Job) anyerror!void {
         root_it: while (it.next()) |kv| {
             if (kv.key_ptr.len == 0) continue;
             if (kv.key_ptr.*[0] == '!') continue;
-            if (kv.value_ptr.* != .Object) continue;
-            if (hasSuperclass(&kv.value_ptr.Object, "SubtargetFeature")) {
-                const llvm_name = kv.value_ptr.Object.get("Name").?.String;
+            if (kv.value_ptr.* != .object) continue;
+            if (hasSuperclass(&kv.value_ptr.object, "SubtargetFeature")) {
+                const llvm_name = kv.value_ptr.object.get("Name").?.string;
                 if (llvm_name.len == 0) continue;
 
                 var zig_name = try llvmNameToZigName(arena, llvm_name);
-                var desc = kv.value_ptr.Object.get("Desc").?.String;
+                var desc = kv.value_ptr.object.get("Desc").?.string;
                 var deps = std.ArrayList([]const u8).init(arena);
                 var omit = false;
                 var flatten = false;
-                const implies = kv.value_ptr.Object.get("Implies").?.Array;
-                for (implies.items) |imply| {
-                    const other_key = imply.Object.get("def").?.String;
-                    const other_obj = &root_map.getPtr(other_key).?.Object;
-                    const other_llvm_name = other_obj.get("Name").?.String;
-                    const other_zig_name = (try llvmNameToZigNameOmit(
-                        arena,
-                        llvm_target,
-                        other_llvm_name,
-                    )) orelse continue;
-                    try deps.append(other_zig_name);
-                }
+                var omit_deps: []const []const u8 = &.{};
+                var extra_deps: []const []const u8 = &.{};
                 for (llvm_target.feature_overrides) |feature_override| {
                     if (mem.eql(u8, llvm_name, feature_override.llvm_name)) {
                         if (feature_override.omit) {
@@ -1108,11 +1158,29 @@ fn processOneTarget(job: Job) anyerror!void {
                         if (feature_override.desc) |override_desc| {
                             desc = override_desc;
                         }
-                        for (feature_override.extra_deps) |extra_dep| {
-                            try deps.append(extra_dep);
-                        }
+                        omit_deps = feature_override.omit_deps;
+                        extra_deps = feature_override.extra_deps;
                         break;
                     }
+                }
+                const implies = kv.value_ptr.object.get("Implies").?.array;
+                for (implies.items) |imply| {
+                    const other_key = imply.object.get("def").?.string;
+                    const other_obj = &root_map.getPtr(other_key).?.object;
+                    const other_llvm_name = other_obj.get("Name").?.string;
+                    const other_zig_name = (try llvmNameToZigNameOmit(
+                        arena,
+                        llvm_target,
+                        other_llvm_name,
+                    )) orelse continue;
+                    for (omit_deps) |omit_dep| {
+                        if (mem.eql(u8, other_zig_name, omit_dep)) break;
+                    } else {
+                        try deps.append(other_zig_name);
+                    }
+                }
+                for (extra_deps) |extra_dep| {
+                    try deps.append(extra_dep);
                 }
                 const feature: Feature = .{
                     .llvm_name = llvm_name,
@@ -1126,30 +1194,56 @@ fn processOneTarget(job: Job) anyerror!void {
                     try all_features.append(feature);
                 }
             }
-            if (hasSuperclass(&kv.value_ptr.Object, "Processor")) {
-                const llvm_name = kv.value_ptr.Object.get("Name").?.String;
+            if (hasSuperclass(&kv.value_ptr.object, "Processor")) {
+                const llvm_name = kv.value_ptr.object.get("Name").?.string;
                 if (llvm_name.len == 0) continue;
+                const omitted = for (llvm_target.omit_cpus) |omit_cpu_name| {
+                    if (mem.eql(u8, omit_cpu_name, llvm_name)) break true;
+                } else false;
+                if (omitted) continue;
 
                 var zig_name = try llvmNameToZigName(arena, llvm_name);
                 var deps = std.ArrayList([]const u8).init(arena);
-                const features = kv.value_ptr.Object.get("Features").?.Array;
+                var omit_deps: []const []const u8 = &.{};
+                var extra_deps: []const []const u8 = &.{};
+                for (llvm_target.feature_overrides) |feature_override| {
+                    if (mem.eql(u8, llvm_name, feature_override.llvm_name)) {
+                        if (feature_override.omit) {
+                            continue :root_it;
+                        }
+                        if (feature_override.zig_name) |override_name| {
+                            zig_name = override_name;
+                        }
+                        omit_deps = feature_override.omit_deps;
+                        extra_deps = feature_override.extra_deps;
+                        break;
+                    }
+                }
+                const features = kv.value_ptr.object.get("Features").?.array;
                 for (features.items) |feature| {
-                    const feature_key = feature.Object.get("def").?.String;
-                    const feature_obj = &root_map.getPtr(feature_key).?.Object;
-                    const feature_llvm_name = feature_obj.get("Name").?.String;
+                    const feature_key = feature.object.get("def").?.string;
+                    const feature_obj = &root_map.getPtr(feature_key).?.object;
+                    const feature_llvm_name = feature_obj.get("Name").?.string;
                     if (feature_llvm_name.len == 0) continue;
                     const feature_zig_name = (try llvmNameToZigNameOmit(
                         arena,
                         llvm_target,
                         feature_llvm_name,
                     )) orelse continue;
-                    try deps.append(feature_zig_name);
+                    for (omit_deps) |omit_dep| {
+                        if (mem.eql(u8, feature_zig_name, omit_dep)) break;
+                    } else {
+                        try deps.append(feature_zig_name);
+                    }
                 }
-                const tune_features = kv.value_ptr.Object.get("TuneFeatures").?.Array;
+                for (extra_deps) |extra_dep| {
+                    try deps.append(extra_dep);
+                }
+                const tune_features = kv.value_ptr.object.get("TuneFeatures").?.array;
                 for (tune_features.items) |feature| {
-                    const feature_key = feature.Object.get("def").?.String;
-                    const feature_obj = &root_map.getPtr(feature_key).?.Object;
-                    const feature_llvm_name = feature_obj.get("Name").?.String;
+                    const feature_key = feature.object.get("def").?.string;
+                    const feature_obj = &root_map.getPtr(feature_key).?.object;
+                    const feature_llvm_name = feature_obj.get("Name").?.string;
                     if (feature_llvm_name.len == 0) continue;
                     const feature_zig_name = (try llvmNameToZigNameOmit(
                         arena,
@@ -1187,10 +1281,10 @@ fn processOneTarget(job: Job) anyerror!void {
     for (llvm_target.extra_cpus) |extra_cpu| {
         try all_cpus.append(extra_cpu);
     }
-    std.sort.sort(Feature, all_features.items, {}, featureLessThan);
-    std.sort.sort(Cpu, all_cpus.items, {}, cpuLessThan);
+    mem.sort(Feature, all_features.items, {}, featureLessThan);
+    mem.sort(Cpu, all_cpus.items, {}, cpuLessThan);
 
-    const target_sub_path = try fs.path.join(arena, &.{ "lib", "std", "target" });
+    const target_sub_path = try fs.path.join(arena, &.{ "lib", "std", "Target" });
     var target_dir = try job.zig_src_dir.makeOpenPath(target_sub_path, .{});
     defer target_dir.close();
 
@@ -1247,7 +1341,7 @@ fn processOneTarget(job: Job) anyerror!void {
     for (all_features.items) |feature| {
         if (feature.llvm_name) |llvm_name| {
             try w.print(
-                \\    result[@enumToInt(Feature.{})] = .{{
+                \\    result[@intFromEnum(Feature.{})] = .{{
                 \\        .llvm_name = "{}",
                 \\        .description = "{}",
                 \\        .dependencies = featureSet(&[_]Feature{{
@@ -1260,7 +1354,7 @@ fn processOneTarget(job: Job) anyerror!void {
             );
         } else {
             try w.print(
-                \\    result[@enumToInt(Feature.{})] = .{{
+                \\    result[@intFromEnum(Feature.{})] = .{{
                 \\        .llvm_name = null,
                 \\        .description = "{}",
                 \\        .dependencies = featureSet(&[_]Feature{{
@@ -1283,7 +1377,7 @@ fn processOneTarget(job: Job) anyerror!void {
                 try dependencies.append(key.*);
             }
         }
-        std.sort.sort([]const u8, dependencies.items, {}, asciiLessThan);
+        mem.sort([]const u8, dependencies.items, {}, asciiLessThan);
 
         if (dependencies.items.len == 0) {
             try w.writeAll(
@@ -1328,7 +1422,7 @@ fn processOneTarget(job: Job) anyerror!void {
                 try cpu_features.append(key.*);
             }
         }
-        std.sort.sort([]const u8, cpu_features.items, {}, asciiLessThan);
+        mem.sort([]const u8, cpu_features.items, {}, asciiLessThan);
         if (cpu.llvm_name) |llvm_name| {
             try w.print(
                 \\    pub const {} = CpuModel{{
@@ -1431,8 +1525,8 @@ fn llvmNameToZigNameOmit(
 
 fn hasSuperclass(obj: *json.ObjectMap, class_name: []const u8) bool {
     const superclasses_json = obj.get("!superclasses") orelse return false;
-    for (superclasses_json.Array.items) |superclass_json| {
-        const superclass = superclass_json.String;
+    for (superclasses_json.array.items) |superclass_json| {
+        const superclass = superclass_json.string;
         if (std.mem.eql(u8, superclass, class_name)) {
             return true;
         }

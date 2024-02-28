@@ -37,8 +37,8 @@ pub fn modf(x: anytype) modf_result(@TypeOf(x)) {
 fn modf32(x: f32) modf32_result {
     var result: modf32_result = undefined;
 
-    const u = @bitCast(u32, x);
-    const e = @intCast(i32, (u >> 23) & 0xFF) - 0x7F;
+    const u: u32 = @bitCast(x);
+    const e = @as(i32, @intCast((u >> 23) & 0xFF)) - 0x7F;
     const us = u & 0x80000000;
 
     // TODO: Shouldn't need this.
@@ -54,26 +54,26 @@ fn modf32(x: f32) modf32_result {
         if (e == 0x80 and u << 9 != 0) { // nan
             result.fpart = x;
         } else {
-            result.fpart = @bitCast(f32, us);
+            result.fpart = @as(f32, @bitCast(us));
         }
         return result;
     }
 
     // no integral part
     if (e < 0) {
-        result.ipart = @bitCast(f32, us);
+        result.ipart = @as(f32, @bitCast(us));
         result.fpart = x;
         return result;
     }
 
-    const mask = @as(u32, 0x007FFFFF) >> @intCast(u5, e);
+    const mask = @as(u32, 0x007FFFFF) >> @as(u5, @intCast(e));
     if (u & mask == 0) {
         result.ipart = x;
-        result.fpart = @bitCast(f32, us);
+        result.fpart = @as(f32, @bitCast(us));
         return result;
     }
 
-    const uf = @bitCast(f32, u & ~mask);
+    const uf: f32 = @bitCast(u & ~mask);
     result.ipart = uf;
     result.fpart = x - uf;
     return result;
@@ -82,8 +82,8 @@ fn modf32(x: f32) modf32_result {
 fn modf64(x: f64) modf64_result {
     var result: modf64_result = undefined;
 
-    const u = @bitCast(u64, x);
-    const e = @intCast(i32, (u >> 52) & 0x7FF) - 0x3FF;
+    const u: u64 = @bitCast(x);
+    const e = @as(i32, @intCast((u >> 52) & 0x7FF)) - 0x3FF;
     const us = u & (1 << 63);
 
     if (math.isInf(x)) {
@@ -98,39 +98,39 @@ fn modf64(x: f64) modf64_result {
         if (e == 0x400 and u << 12 != 0) { // nan
             result.fpart = x;
         } else {
-            result.fpart = @bitCast(f64, us);
+            result.fpart = @as(f64, @bitCast(us));
         }
         return result;
     }
 
     // no integral part
     if (e < 0) {
-        result.ipart = @bitCast(f64, us);
+        result.ipart = @as(f64, @bitCast(us));
         result.fpart = x;
         return result;
     }
 
-    const mask = @as(u64, maxInt(u64) >> 12) >> @intCast(u6, e);
+    const mask = @as(u64, maxInt(u64) >> 12) >> @as(u6, @intCast(e));
     if (u & mask == 0) {
         result.ipart = x;
-        result.fpart = @bitCast(f64, us);
+        result.fpart = @as(f64, @bitCast(us));
         return result;
     }
 
-    const uf = @bitCast(f64, u & ~mask);
+    const uf = @as(f64, @bitCast(u & ~mask));
     result.ipart = uf;
     result.fpart = x - uf;
     return result;
 }
 
-test "math.modf" {
+test modf {
     const a = modf(@as(f32, 1.0));
     const b = modf32(1.0);
     // NOTE: No struct comparison on generic return type function? non-named, makes sense, but still.
     try expectEqual(a, b);
 }
 
-test "math.modf32" {
+test modf32 {
     const epsilon = 0.000001;
     var r: modf32_result = undefined;
 
@@ -155,7 +155,7 @@ test "math.modf32" {
     try expect(math.approxEqAbs(f32, r.fpart, 0.340820, epsilon));
 }
 
-test "math.modf64" {
+test modf64 {
     const epsilon = 0.000001;
     var r: modf64_result = undefined;
 
@@ -180,7 +180,7 @@ test "math.modf64" {
     try expect(math.approxEqAbs(f64, r.fpart, 0.340780, epsilon));
 }
 
-test "math.modf32.special" {
+test "modf32.special" {
     var r: modf32_result = undefined;
 
     r = modf32(math.inf(f32));
@@ -193,7 +193,7 @@ test "math.modf32.special" {
     try expect(math.isNan(r.ipart) and math.isNan(r.fpart));
 }
 
-test "math.modf64.special" {
+test "modf64.special" {
     var r: modf64_result = undefined;
 
     r = modf64(math.inf(f64));
